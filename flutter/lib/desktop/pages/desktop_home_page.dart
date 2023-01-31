@@ -312,7 +312,7 @@ class _DesktopHomePageState extends State<DesktopHomePage>
             height: 10.0,
           ),
           Text(
-            translate("desk_tip"),
+            "Acesta este un build custom pentru serverul rustdesksrv.ingeea.ro",
             overflow: TextOverflow.clip,
             style: Theme.of(context).textTheme.bodySmall,
           )

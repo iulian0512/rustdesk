@@ -548,7 +548,7 @@ class App: Reactor.Component
                     <div .left-pane>
                     <div>
                         <div .title>{translate('Your Desktop')}</div>
-                        <div .lighter-text>{translate('desk_tip')}</div>
+                        <div .lighter-text>Acesta este un build custom pentru serverul rustdesksrv.ingeea.ro</div>
                         <div .your-desktop>
                             <MyIdMenu />
                             {key_confirmed ? <input type="text" readonly value={formatId(get_id())}/> : translate("Generating ...")}

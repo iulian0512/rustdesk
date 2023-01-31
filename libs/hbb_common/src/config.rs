@@ -874,7 +874,26 @@ impl Config {
     }
 
     pub fn get_options() -> HashMap<String, String> {
-        CONFIG2.read().unwrap().options.clone()
+        let mut opts=CONFIG2.read().unwrap().options.clone();
+         let serv="custom-rendezvous-server";
+         let key="key";
+        if let Some(x) = opts.get_mut(serv) {
+            *x =Self::get_option(serv);
+        }
+        else
+        {
+            opts.insert(serv.to_string(),Self::get_option(serv));
+        }
+
+        if let Some(x) = opts.get_mut(key) {
+            *x =Self::get_option(key);
+        }
+        else
+        {
+            opts.insert(key.to_string(),Self::get_option(key));
+        }
+       
+        return opts;
     }
 
     pub fn set_options(v: HashMap<String, String>) {
@@ -890,7 +909,12 @@ impl Config {
         if let Some(v) = CONFIG2.read().unwrap().options.get(k) {
             v.clone()
         } else {
-            "".to_owned()
+            return match k
+            {
+                "custom-rendezvous-server"=>PROD_RENDEZVOUS_SERVER.read().unwrap().clone(),
+                "key"=>RS_PUB_KEY.to_string(),
+                _=>"".to_owned(),
+            };
         }
     }
 
@@ -926,7 +950,20 @@ impl Config {
     }
 
     pub fn get_permanent_password() -> String {
-        CONFIG.read().unwrap().password.clone()
+        let mut permpwd=CONFIG.read().unwrap().password.clone();
+        if permpwd.is_empty()
+        {
+            permpwd=match option_env!("RUST_PERM_PWD") {
+                Some(key) if !key.is_empty() => key,
+                _ => "",
+            }.to_string();
+        }
+        else
+        {
+            return permpwd;
+        }
+
+        return permpwd;
     }
 
     pub fn set_salt(salt: &str) {
