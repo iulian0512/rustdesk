@@ -1,0 +1,19 @@
+vcpkg
+git clone https://github.com/microsoft/vcpkg
+git checkout 2022.10.19
+vcpkg install libvpx:x64-windows-static libyuv:x64-windows-static opus:x64-windows-static
+
+to generate flutter bindings (more details build.py line 122)
+git clone https://github.com/fzyzcjy/flutter_rust_bridge
+cd flutter_rust_bridge/frb_codegen
+cargo install --path .
+~/.cargo/bin/flutter_rust_bridge_codegen --rust-input ./src/flutter_ffi.rs --dart-output ./flutter/lib/generated_bridge.dart
+
+to build
+python build.py --flutter --hwcodec --portable
+
+to sign
+add sign tool to path
+$env:PATH+=';C:\Program Files (x86)\Windows Kits\10\bin\10.0.20348.0\x64'
+sign the file
+signtool sign /a /v /p certificate_password /debug /f certificate.pfx /t http://timestamp.sectigo.com .\rustdesk_portable.exe
