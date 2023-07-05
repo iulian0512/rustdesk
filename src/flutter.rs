@@ -1,27 +1,64 @@
-use crate::ui_session_interface::{io_loop, InvokeUiSession, Session};
-use crate::{client::*, flutter_ffi::EventToUI};
-use flutter_rust_bridge::{StreamSink, ZeroCopyBuffer};
+use crate::{
+    client::*,
+    flutter_ffi::{EventToUI, SessionID},
+    ui_session_interface::{io_loop, InvokeUiSession, Session},
+};
+use flutter_rust_bridge::StreamSink;
 use hbb_common::{
-    bail, config::LocalConfig, get_version_number, message_proto::*, rendezvous_proto::ConnType,
-    ResultType,
+    anyhow::anyhow, bail, config::LocalConfig, get_version_number, log, message_proto::*,
+    rendezvous_proto::ConnType, ResultType,
+};
+#[cfg(feature = "flutter_texture_render")]
+use hbb_common::{
+    dlopen::{
+        symbor::{Library, Symbol},
+        Error as LibError,
+    },
+    libc::c_void,
 };
 use serde_json::json;
+
+#[cfg(not(feature = "flutter_texture_render"))]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     collections::HashMap,
     ffi::CString,
     os::raw::{c_char, c_int},
+    str::FromStr,
     sync::{Arc, RwLock},
 };
 
-pub(super) const APP_TYPE_MAIN: &str = "main";
-pub(super) const APP_TYPE_DESKTOP_REMOTE: &str = "remote";
-pub(super) const APP_TYPE_DESKTOP_FILE_TRANSFER: &str = "file transfer";
-pub(super) const APP_TYPE_DESKTOP_PORT_FORWARD: &str = "port forward";
+/// tag "main" for [Desktop Main Page] and [Mobile (Client and Server)] (the mobile don't need multiple windows, only one global event stream is needed)
+/// tag "cm" only for [Desktop CM Page]
+pub(crate) const APP_TYPE_MAIN: &str = "main";
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) const APP_TYPE_CM: &str = "cm";
+#[cfg(any(target_os = "android", target_os = "ios"))]
+pub(crate) const APP_TYPE_CM: &str = "main";
+
+pub(crate) const APP_TYPE_DESKTOP_REMOTE: &str = "remote";
+pub(crate) const APP_TYPE_DESKTOP_FILE_TRANSFER: &str = "file transfer";
+pub(crate) const APP_TYPE_DESKTOP_PORT_FORWARD: &str = "port forward";
 
 lazy_static::lazy_static! {
-    pub static ref CUR_SESSION_ID: RwLock<String> = Default::default();
-    pub static ref SESSIONS: RwLock<HashMap<String, Session<FlutterHandler>>> = Default::default();
-    pub static ref GLOBAL_EVENT_STREAM: RwLock<HashMap<String, StreamSink<String>>> = Default::default(); // rust to dart event channel
+    pub(crate) static ref CUR_SESSION_ID: RwLock<SessionID> = Default::default();
+    pub(crate) static ref SESSIONS: RwLock<HashMap<SessionID, Session<FlutterHandler>>> = Default::default();
+    static ref GLOBAL_EVENT_STREAM: RwLock<HashMap<String, StreamSink<String>>> = Default::default(); // rust to dart event channel
+}
+
+#[cfg(all(target_os = "windows", feature = "flutter_texture_render"))]
+lazy_static::lazy_static! {
+    pub static ref TEXTURE_RGBA_RENDERER_PLUGIN: Result<Library, LibError> = Library::open("texture_rgba_renderer_plugin.dll");
+}
+
+#[cfg(all(target_os = "linux", feature = "flutter_texture_render"))]
+lazy_static::lazy_static! {
+    pub static ref TEXTURE_RGBA_RENDERER_PLUGIN: Result<Library, LibError> = Library::open("libtexture_rgba_renderer_plugin.so");
+}
+
+#[cfg(all(target_os = "macos", feature = "flutter_texture_render"))]
+lazy_static::lazy_static! {
+    pub static ref TEXTURE_RGBA_RENDERER_PLUGIN: Result<Library, LibError> = Library::open_self();
 }
 
 /// FFI for rustdesk core's main entry.
@@ -30,18 +67,19 @@ lazy_static::lazy_static! {
 #[no_mangle]
 pub extern "C" fn rustdesk_core_main() -> bool {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    return crate::core_main::core_main().is_some();
-    #[cfg(any(target_os = "android", target_os = "ios"))]
+    if crate::core_main::core_main().is_some() {
+        return true;
+    } else {
+        #[cfg(target_os = "macos")]
+        std::process::exit(0);
+    }
     false
 }
 
 #[cfg(target_os = "macos")]
 #[no_mangle]
 pub extern "C" fn handle_applicationShouldOpenUntitledFile() {
-    hbb_common::log::debug!("icon clicked on finder");
-    if std::env::args().nth(1) == Some("--server".to_owned()) {
-        crate::platform::macos::check_main_window();
-    }
+    crate::platform::macos::handle_application_should_open_untitled_file();
 }
 
 #[cfg(windows)]
@@ -75,7 +113,7 @@ fn rust_args_to_c_args(args: Vec<String>, outlen: *mut c_int) -> *mut *mut c_cha
 
     // Make sure we're not wasting space.
     out.shrink_to_fit();
-    assert!(out.len() == out.capacity());
+    debug_assert!(out.len() == out.capacity());
 
     // Get the pointer to our vector.
     let len = out.len();
@@ -106,9 +144,112 @@ pub unsafe extern "C" fn free_c_args(ptr: *mut *mut c_char, len: c_int) {
     // Afterwards the vector will be dropped and thus freed.
 }
 
+#[cfg(feature = "flutter_texture_render")]
 #[derive(Default, Clone)]
 pub struct FlutterHandler {
     pub event_stream: Arc<RwLock<Option<StreamSink<EventToUI>>>>,
+    notify_rendered: Arc<RwLock<bool>>,
+    renderer: Arc<RwLock<VideoRenderer>>,
+    peer_info: Arc<RwLock<PeerInfo>>,
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    hooks: Arc<RwLock<HashMap<String, SessionHook>>>,
+}
+
+#[cfg(not(feature = "flutter_texture_render"))]
+#[derive(Default, Clone)]
+pub struct FlutterHandler {
+    pub event_stream: Arc<RwLock<Option<StreamSink<EventToUI>>>>,
+    // SAFETY: [rgba] is guarded by [rgba_valid], and it's safe to reach [rgba] with `rgba_valid == true`.
+    // We must check the `rgba_valid` before reading [rgba].
+    pub rgba: Arc<RwLock<Vec<u8>>>,
+    pub rgba_valid: Arc<AtomicBool>,
+    peer_info: Arc<RwLock<PeerInfo>>,
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    hooks: Arc<RwLock<HashMap<String, SessionHook>>>,
+}
+
+#[cfg(feature = "flutter_texture_render")]
+pub type FlutterRgbaRendererPluginOnRgba = unsafe extern "C" fn(
+    texture_rgba: *mut c_void,
+    buffer: *const u8,
+    len: c_int,
+    width: c_int,
+    height: c_int,
+    dst_rgba_stride: c_int,
+);
+
+// Video Texture Renderer in Flutter
+#[cfg(feature = "flutter_texture_render")]
+#[derive(Clone)]
+struct VideoRenderer {
+    // TextureRgba pointer in flutter native.
+    ptr: usize,
+    width: usize,
+    height: usize,
+    on_rgba_func: Option<Symbol<'static, FlutterRgbaRendererPluginOnRgba>>,
+}
+
+#[cfg(feature = "flutter_texture_render")]
+impl Default for VideoRenderer {
+    fn default() -> Self {
+        let on_rgba_func = match &*TEXTURE_RGBA_RENDERER_PLUGIN {
+            Ok(lib) => {
+                let find_sym_res = unsafe {
+                    lib.symbol::<FlutterRgbaRendererPluginOnRgba>("FlutterRgbaRendererPluginOnRgba")
+                };
+                match find_sym_res {
+                    Ok(sym) => Some(sym),
+                    Err(e) => {
+                        log::error!("Failed to find symbol FlutterRgbaRendererPluginOnRgba, {e}");
+                        None
+                    }
+                }
+            }
+            Err(e) => {
+                log::error!("Failed to load texture rgba renderer plugin, {e}");
+                None
+            }
+        };
+        Self {
+            ptr: 0,
+            width: 0,
+            height: 0,
+            on_rgba_func,
+        }
+    }
+}
+
+#[cfg(feature = "flutter_texture_render")]
+impl VideoRenderer {
+    #[inline]
+    pub fn set_size(&mut self, width: usize, height: usize) {
+        self.width = width;
+        self.height = height;
+    }
+
+    pub fn on_rgba(&self, rgba: &mut scrap::ImageRgb) {
+        if self.ptr == usize::default() {
+            return;
+        }
+
+        // It is also Ok to skip this check.
+        if self.width != rgba.w || self.height != rgba.h {
+            return;
+        }
+
+        if let Some(func) = &self.on_rgba_func {
+            unsafe {
+                func(
+                    self.ptr as _,
+                    rgba.raw.as_ptr() as _,
+                    rgba.raw.len() as _,
+                    rgba.w as _,
+                    rgba.h as _,
+                    rgba.stride() as _,
+                )
+            };
+        }
+    }
 }
 
 impl FlutterHandler {
@@ -119,14 +260,79 @@ impl FlutterHandler {
     ///
     /// * `name` - The name of the event.
     /// * `event` - Fields of the event content.
-    fn push_event(&self, name: &str, event: Vec<(&str, &str)>) {
+    pub fn push_event(&self, name: &str, event: Vec<(&str, &str)>) -> Option<bool> {
         let mut h: HashMap<&str, &str> = event.iter().cloned().collect();
-        assert!(h.get("name").is_none());
+        debug_assert!(h.get("name").is_none());
         h.insert("name", name);
         let out = serde_json::ser::to_string(&h).unwrap_or("".to_owned());
-        if let Some(stream) = &*self.event_stream.read().unwrap() {
-            stream.add(EventToUI::Event(out));
+        Some(
+            self.event_stream
+                .read()
+                .unwrap()
+                .as_ref()?
+                .add(EventToUI::Event(out)),
+        )
+    }
+
+    pub(crate) fn close_event_stream(&mut self) {
+        let mut stream_lock = self.event_stream.write().unwrap();
+        if let Some(stream) = &*stream_lock {
+            stream.add(EventToUI::Event("close".to_owned()));
         }
+        *stream_lock = None;
+    }
+
+    fn make_displays_msg(displays: &Vec<DisplayInfo>) -> String {
+        let mut msg_vec = Vec::new();
+        for ref d in displays.iter() {
+            let mut h: HashMap<&str, i32> = Default::default();
+            h.insert("x", d.x);
+            h.insert("y", d.y);
+            h.insert("width", d.width);
+            h.insert("height", d.height);
+            h.insert("cursor_embedded", if d.cursor_embedded { 1 } else { 0 });
+            if let Some(original_resolution) = d.original_resolution.as_ref() {
+                h.insert("original_width", original_resolution.width);
+                h.insert("original_height", original_resolution.height);
+            }
+            msg_vec.push(h);
+        }
+        serde_json::ser::to_string(&msg_vec).unwrap_or("".to_owned())
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    pub(crate) fn add_session_hook(&self, key: String, hook: SessionHook) -> bool {
+        let mut hooks = self.hooks.write().unwrap();
+        if hooks.contains_key(&key) {
+            // Already has the hook with this key.
+            return false;
+        }
+        let _ = hooks.insert(key, hook);
+        true
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    pub(crate) fn remove_session_hook(&self, key: &String) -> bool {
+        let mut hooks = self.hooks.write().unwrap();
+        if !hooks.contains_key(key) {
+            // The hook with this key does not found.
+            return false;
+        }
+        let _ = hooks.remove(key);
+        true
+    }
+
+    #[inline]
+    #[cfg(feature = "flutter_texture_render")]
+    pub fn register_texture(&mut self, ptr: usize) {
+        self.renderer.write().unwrap().ptr = ptr;
+    }
+
+    #[inline]
+    #[cfg(feature = "flutter_texture_render")]
+    pub fn set_size(&mut self, width: usize, height: usize) {
+        *self.notify_rendered.write().unwrap() = false;
+        self.renderer.write().unwrap().set_size(width, height);
     }
 }
 
@@ -204,6 +410,10 @@ impl InvokeUiSession for FlutterHandler {
         );
     }
 
+    fn set_fingerprint(&self, fingerprint: String) {
+        self.push_event("fingerprint", vec![("fingerprint", &fingerprint)]);
+    }
+
     fn job_error(&self, id: i32, err: String, file_num: i32) {
         self.push_event(
             "job_error",
@@ -260,7 +470,14 @@ impl InvokeUiSession for FlutterHandler {
     // unused in flutter // TEST flutter
     fn confirm_delete_files(&self, _id: i32, _i: i32, _name: String) {}
 
-    fn override_file_confirm(&self, id: i32, file_num: i32, to: String, is_upload: bool) {
+    fn override_file_confirm(
+        &self,
+        id: i32,
+        file_num: i32,
+        to: String,
+        is_upload: bool,
+        is_identical: bool,
+    ) {
         self.push_event(
             "override_file_confirm",
             vec![
@@ -268,6 +485,7 @@ impl InvokeUiSession for FlutterHandler {
                 ("file_num", &file_num.to_string()),
                 ("read_path", &to),
                 ("is_upload", &is_upload.to_string()),
+                ("is_identical", &is_identical.to_string()),
             ],
         );
     }
@@ -287,24 +505,46 @@ impl InvokeUiSession for FlutterHandler {
     // unused in flutter
     fn adapt_size(&self) {}
 
-    fn on_rgba(&self, data: &[u8]) {
+    #[inline]
+    #[cfg(not(feature = "flutter_texture_render"))]
+    fn on_rgba(&self, rgba: &mut scrap::ImageRgb) {
+        // Give a chance for plugins or etc to hook a rgba data.
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        for (key, hook) in self.hooks.read().unwrap().iter() {
+            match hook {
+                SessionHook::OnSessionRgba(cb) => {
+                    cb(key.to_owned(), rgba);
+                }
+            }
+        }
+        // If the current rgba is not fetched by flutter, i.e., is valid.
+        // We give up sending a new event to flutter.
+        if self.rgba_valid.load(Ordering::Relaxed) {
+            return;
+        }
+        self.rgba_valid.store(true, Ordering::Relaxed);
+        // Return the rgba buffer to the video handler for reusing allocated rgba buffer.
+        std::mem::swap::<Vec<u8>>(&mut rgba.raw, &mut *self.rgba.write().unwrap());
         if let Some(stream) = &*self.event_stream.read().unwrap() {
-            stream.add(EventToUI::Rgba(ZeroCopyBuffer(data.to_owned())));
+            stream.add(EventToUI::Rgba);
+        }
+    }
+
+    #[inline]
+    #[cfg(feature = "flutter_texture_render")]
+    fn on_rgba(&self, rgba: &mut scrap::ImageRgb) {
+        self.renderer.read().unwrap().on_rgba(rgba);
+        if *self.notify_rendered.read().unwrap() {
+            return;
+        }
+        if let Some(stream) = &*self.event_stream.read().unwrap() {
+            stream.add(EventToUI::Rgba);
+            *self.notify_rendered.write().unwrap() = true;
         }
     }
 
     fn set_peer_info(&self, pi: &PeerInfo) {
-        let mut displays = Vec::new();
-        for ref d in pi.displays.iter() {
-            let mut h: HashMap<&str, i32> = Default::default();
-            h.insert("x", d.x);
-            h.insert("y", d.y);
-            h.insert("width", d.width);
-            h.insert("height", d.height);
-            h.insert("cursor_embedded", if d.cursor_embedded { 1 } else { 0 });
-            displays.push(h);
-        }
-        let displays = serde_json::ser::to_string(&displays).unwrap_or("".to_owned());
+        let displays = Self::make_displays_msg(&pi.displays);
         let mut features: HashMap<&str, i32> = Default::default();
         for ref f in pi.features.iter() {
             features.insert("privacy_mode", if f.privacy_mode { 1 } else { 0 });
@@ -314,6 +554,8 @@ impl InvokeUiSession for FlutterHandler {
             features.insert("privacy_mode", 0);
         }
         let features = serde_json::ser::to_string(&features).unwrap_or("".to_owned());
+        let resolutions = serialize_resolutions(&pi.resolutions.resolutions);
+        *self.peer_info.write().unwrap() = pi.clone();
         self.push_event(
             "peer_info",
             vec![
@@ -325,7 +567,17 @@ impl InvokeUiSession for FlutterHandler {
                 ("version", &pi.version),
                 ("features", &features),
                 ("current_display", &pi.current_display.to_string()),
+                ("resolutions", &resolutions),
+                ("platform_additions", &pi.platform_additions),
             ],
+        );
+    }
+
+    fn set_displays(&self, displays: &Vec<DisplayInfo>) {
+        self.peer_info.write().unwrap().displays = displays.clone();
+        self.push_event(
+            "sync_peer_info",
+            vec![("displays", &Self::make_displays_msg(displays))],
         );
     }
 
@@ -354,6 +606,7 @@ impl InvokeUiSession for FlutterHandler {
     }
 
     fn switch_display(&self, display: &SwitchDisplay) {
+        let resolutions = serialize_resolutions(&display.resolutions.resolutions);
         self.push_event(
             "switch_display",
             vec![
@@ -372,6 +625,15 @@ impl InvokeUiSession for FlutterHandler {
                         }
                     }
                     .to_string(),
+                ),
+                ("resolutions", &resolutions),
+                (
+                    "original_width",
+                    &display.original_resolution.width.to_string(),
+                ),
+                (
+                    "original_height",
+                    &display.original_resolution.height.to_string(),
                 ),
             ],
         );
@@ -392,6 +654,44 @@ impl InvokeUiSession for FlutterHandler {
     fn switch_back(&self, peer_id: &str) {
         self.push_event("switch_back", [("peer_id", peer_id)].into());
     }
+
+    fn portable_service_running(&self, running: bool) {
+        self.push_event(
+            "portable_service_running",
+            [("running", running.to_string().as_str())].into(),
+        );
+    }
+
+    fn on_voice_call_started(&self) {
+        self.push_event("on_voice_call_started", [].into());
+    }
+
+    fn on_voice_call_closed(&self, reason: &str) {
+        let _res = self.push_event("on_voice_call_closed", [("reason", reason)].into());
+    }
+
+    fn on_voice_call_waiting(&self) {
+        self.push_event("on_voice_call_waiting", [].into());
+    }
+
+    fn on_voice_call_incoming(&self) {
+        self.push_event("on_voice_call_incoming", [].into());
+    }
+
+    #[inline]
+    fn get_rgba(&self) -> *const u8 {
+        #[cfg(not(feature = "flutter_texture_render"))]
+        if self.rgba_valid.load(Ordering::Relaxed) {
+            return self.rgba.read().unwrap().as_ptr();
+        }
+        std::ptr::null_mut()
+    }
+
+    #[inline]
+    fn next_rgba(&self) {
+        #[cfg(not(feature = "flutter_texture_render"))]
+        self.rgba_valid.store(false, Ordering::Relaxed);
+    }
 }
 
 /// Create a new remote session with the given id.
@@ -402,24 +702,35 @@ impl InvokeUiSession for FlutterHandler {
 /// * `is_file_transfer` - If the session is used for file transfer.
 /// * `is_port_forward` - If the session is used for port forward.
 pub fn session_add(
+    session_id: &SessionID,
     id: &str,
     is_file_transfer: bool,
     is_port_forward: bool,
+    is_rdp: bool,
     switch_uuid: &str,
-) -> ResultType<()> {
-    let session_id = get_session_id(id.to_owned());
-    LocalConfig::set_remote_id(&session_id);
+    force_relay: bool,
+    password: String,
+) -> ResultType<Session<FlutterHandler>> {
+    LocalConfig::set_remote_id(&id);
 
     let session: Session<FlutterHandler> = Session {
-        id: session_id.clone(),
+        session_id: session_id.clone(),
+        id: id.to_owned(),
+        password,
+        server_keyboard_enabled: Arc::new(RwLock::new(true)),
+        server_file_transfer_enabled: Arc::new(RwLock::new(true)),
+        server_clipboard_enabled: Arc::new(RwLock::new(true)),
         ..Default::default()
     };
 
-    // TODO rdp
     let conn_type = if is_file_transfer {
         ConnType::FILE_TRANSFER
     } else if is_port_forward {
-        ConnType::PORT_FORWARD
+        if is_rdp {
+            ConnType::RDP
+        } else {
+            ConnType::PORT_FORWARD
+        }
     } else {
         ConnType::DEFAULT_CONN
     };
@@ -434,13 +745,18 @@ pub fn session_add(
         .lc
         .write()
         .unwrap()
-        .initialize(session_id, conn_type, switch_uuid);
+        .initialize(id.to_owned(), conn_type, switch_uuid, force_relay);
 
-    if let Some(same_id_session) = SESSIONS.write().unwrap().insert(id.to_owned(), session) {
+    if let Some(same_id_session) = SESSIONS
+        .write()
+        .unwrap()
+        .insert(session_id.to_owned(), session.clone())
+    {
+        log::error!("Should not happen");
         same_id_session.close();
     }
 
-    Ok(())
+    Ok(session)
 }
 
 /// start a session with the given id.
@@ -449,8 +765,19 @@ pub fn session_add(
 ///
 /// * `id` - The identifier of the remote session with prefix. Regex: [\w]*[\_]*[\d]+
 /// * `events2ui` - The events channel to ui.
-pub fn session_start_(id: &str, event_stream: StreamSink<EventToUI>) -> ResultType<()> {
-    if let Some(session) = SESSIONS.write().unwrap().get_mut(id) {
+pub fn session_start_(
+    session_id: &SessionID,
+    id: &str,
+    event_stream: StreamSink<EventToUI>,
+) -> ResultType<()> {
+    if let Some(session) = SESSIONS.write().unwrap().get_mut(session_id) {
+        #[cfg(feature = "flutter_texture_render")]
+        log::info!(
+            "Session {} start, render by flutter texture rgba plugin",
+            id
+        );
+        #[cfg(not(feature = "flutter_texture_render"))]
+        log::info!("Session {} start, render by flutter paint widget", id);
         *session.event_stream.write().unwrap() = Some(event_stream);
         let session = session.clone();
         std::thread::spawn(move || {
@@ -459,6 +786,37 @@ pub fn session_start_(id: &str, event_stream: StreamSink<EventToUI>) -> ResultTy
         Ok(())
     } else {
         bail!("No session with peer id {}", id)
+    }
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub fn update_text_clipboard_required() {
+    let is_required = SESSIONS
+        .read()
+        .unwrap()
+        .iter()
+        .any(|(_id, session)| session.is_text_clipboard_required());
+    Client::set_is_text_clipboard_required(is_required);
+}
+
+#[inline]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub fn other_sessions_running(session_id: &SessionID) -> bool {
+    SESSIONS
+        .read()
+        .unwrap()
+        .keys()
+        .filter(|k| *k != session_id)
+        .count()
+        != 0
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub fn send_text_clipboard_msg(msg: Message) {
+    for (_id, session) in SESSIONS.read().unwrap().iter() {
+        if session.is_text_clipboard_required() {
+            session.send(Data::Message(msg.clone()));
+        }
     }
 }
 
@@ -519,26 +877,45 @@ pub mod connection_manager {
         fn show_elevation(&self, show: bool) {
             self.push_event("show_elevation", vec![("show", &show.to_string())]);
         }
+
+        fn update_voice_call_state(&self, client: &crate::ui_cm_interface::Client) {
+            let client_json = serde_json::to_string(&client).unwrap_or("".into());
+            self.push_event("update_voice_call_state", vec![("client", &client_json)]);
+        }
     }
 
     impl FlutterHandler {
         fn push_event(&self, name: &str, event: Vec<(&str, &str)>) {
             let mut h: HashMap<&str, &str> = event.iter().cloned().collect();
-            assert!(h.get("name").is_none());
+            debug_assert!(h.get("name").is_none());
             h.insert("name", name);
 
-            if let Some(s) = GLOBAL_EVENT_STREAM
-                .read()
-                .unwrap()
-                .get(super::APP_TYPE_MAIN)
-            {
+            if let Some(s) = GLOBAL_EVENT_STREAM.read().unwrap().get(super::APP_TYPE_CM) {
                 s.add(serde_json::ser::to_string(&h).unwrap_or("".to_owned()));
+            } else {
+                println!(
+                    "Push event {} failed. No {} event stream found.",
+                    name,
+                    super::APP_TYPE_CM
+                );
             };
         }
     }
 
+    #[inline]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    pub fn start_cm_no_ui() {
+        start_listen_ipc(false);
+    }
+
+    #[inline]
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     pub fn start_listen_ipc_thread() {
+        start_listen_ipc(true);
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    fn start_listen_ipc(new_thread: bool) {
         use crate::ui_cm_interface::{start_ipc, ConnectionManager};
 
         #[cfg(target_os = "linux")]
@@ -547,7 +924,11 @@ pub mod connection_manager {
         let cm = ConnectionManager {
             ui_handler: FlutterHandler {},
         };
-        std::thread::spawn(move || start_ipc(cm));
+        if new_thread {
+            std::thread::spawn(move || start_ipc(cm));
+        } else {
+            start_ipc(cm);
+        }
     }
 
     #[cfg(target_os = "android")]
@@ -564,15 +945,6 @@ pub mod connection_manager {
         };
         std::thread::spawn(move || start_listen(cm, rx, tx));
     }
-}
-
-#[inline]
-pub fn get_session_id(id: String) -> String {
-    return if let Some(index) = id.find('_') {
-        id[index + 1..].to_string()
-    } else {
-        id
-    };
 }
 
 pub fn make_fd_flutter(id: i32, entries: &Vec<FileEntry>, only_count: bool) -> String {
@@ -602,12 +974,126 @@ pub fn make_fd_flutter(id: i32, entries: &Vec<FileEntry>, only_count: bool) -> S
     serde_json::to_string(&m).unwrap_or("".into())
 }
 
-pub fn get_cur_session_id() -> String {
+pub fn get_cur_session_id() -> SessionID {
     CUR_SESSION_ID.read().unwrap().clone()
 }
 
-pub fn set_cur_session_id(id: String) {
-    if get_cur_session_id() != id {
-        *CUR_SESSION_ID.write().unwrap() = id;
+pub fn set_cur_session_id(session_id: SessionID) {
+    if get_cur_session_id() != session_id {
+        *CUR_SESSION_ID.write().unwrap() = session_id;
     }
+}
+
+#[inline]
+fn serialize_resolutions(resolutions: &Vec<Resolution>) -> String {
+    #[derive(Debug, serde::Serialize)]
+    struct ResolutionSerde {
+        width: i32,
+        height: i32,
+    }
+
+    let mut v = vec![];
+    resolutions
+        .iter()
+        .map(|r| {
+            v.push(ResolutionSerde {
+                width: r.width,
+                height: r.height,
+            })
+        })
+        .count();
+    serde_json::ser::to_string(&v).unwrap_or("".to_string())
+}
+
+fn char_to_session_id(c: *const char) -> ResultType<SessionID> {
+    let cstr = unsafe { std::ffi::CStr::from_ptr(c as _) };
+    let str = cstr.to_str()?;
+    SessionID::from_str(str).map_err(|e| anyhow!("{:?}", e))
+}
+
+#[no_mangle]
+pub fn session_get_rgba_size(_session_uuid_str: *const char) -> usize {
+    #[cfg(not(feature = "flutter_texture_render"))]
+    if let Ok(session_id) = char_to_session_id(_session_uuid_str) {
+        if let Some(session) = SESSIONS.read().unwrap().get(&session_id) {
+            return session.rgba.read().unwrap().len();
+        }
+    }
+    0
+}
+
+#[no_mangle]
+pub fn session_get_rgba(session_uuid_str: *const char) -> *const u8 {
+    if let Ok(session_id) = char_to_session_id(session_uuid_str) {
+        if let Some(session) = SESSIONS.read().unwrap().get(&session_id) {
+            return session.get_rgba();
+        }
+    }
+
+    std::ptr::null()
+}
+
+#[no_mangle]
+pub fn session_next_rgba(session_uuid_str: *const char) {
+    if let Ok(session_id) = char_to_session_id(session_uuid_str) {
+        if let Some(session) = SESSIONS.read().unwrap().get(&session_id) {
+            return session.next_rgba();
+        }
+    }
+}
+
+#[inline]
+#[no_mangle]
+pub fn session_register_texture(_session_uuid_str: *const char, _ptr: usize) {
+    #[cfg(feature = "flutter_texture_render")]
+    if let Ok(session_id) = char_to_session_id(_session_uuid_str) {
+        if let Some(session) = SESSIONS.write().unwrap().get_mut(&session_id) {
+            return session.register_texture(_ptr);
+        }
+    }
+}
+
+#[inline]
+pub fn push_session_event(
+    session_id: &SessionID,
+    name: &str,
+    event: Vec<(&str, &str)>,
+) -> Option<bool> {
+    SESSIONS
+        .read()
+        .unwrap()
+        .get(session_id)?
+        .push_event(name, event)
+}
+
+#[inline]
+pub fn push_global_event(channel: &str, event: String) -> Option<bool> {
+    Some(GLOBAL_EVENT_STREAM.read().unwrap().get(channel)?.add(event))
+}
+
+pub fn start_global_event_stream(s: StreamSink<String>, app_type: String) -> ResultType<()> {
+    if let Some(_) = GLOBAL_EVENT_STREAM
+        .write()
+        .unwrap()
+        .insert(app_type.clone(), s)
+    {
+        log::warn!(
+            "Global event stream of type {} is started before, but now removed",
+            app_type
+        );
+    }
+    Ok(())
+}
+
+pub fn stop_global_event_stream(app_type: String) {
+    let _ = GLOBAL_EVENT_STREAM.write().unwrap().remove(&app_type);
+}
+
+#[no_mangle]
+unsafe extern "C" fn get_rgba() {}
+
+/// Hooks for session.
+#[derive(Clone)]
+pub enum SessionHook {
+    OnSessionRgba(fn(String, &mut scrap::ImageRgb)),
 }

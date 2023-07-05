@@ -1,14 +1,18 @@
+#[cfg(not(debug_assertions))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+use crate::platform::breakdown_callback;
 use hbb_common::log;
+#[cfg(not(debug_assertions))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+use hbb_common::platform::register_breakdown_handler;
 
 /// shared by flutter and sciter main function
 ///
 /// [Note]
 /// If it returns [`None`], then the process will terminate, and flutter gui will not be started.
 /// If it returns [`Some`], then the process will continue, and flutter gui will be started.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub fn core_main() -> Option<Vec<String>> {
-    // https://docs.rs/flexi_logger/latest/flexi_logger/error_info/index.html#write
-    // though async logger more efficient, but it also causes more problems, disable it for now
-    // let mut _async_logger_holder: Option<flexi_logger::LoggerHandle> = None;
     let mut args = Vec::new();
     let mut flutter_args = Vec::new();
     let mut i = 0;
@@ -18,12 +22,11 @@ pub fn core_main() -> Option<Vec<String>> {
     let mut _is_flutter_connect = false;
     let mut arg_exe = Default::default();
     for arg in std::env::args() {
-        // to-do: how to pass to flutter?
         if i == 0 {
             arg_exe = arg;
         } else if i > 0 {
             #[cfg(feature = "flutter")]
-            if arg == "--connect" {
+            if arg == "--connect" || arg == "--play" {
                 _is_flutter_connect = true;
             }
             if arg == "--elevate" {
@@ -38,10 +41,20 @@ pub fn core_main() -> Option<Vec<String>> {
         }
         i += 1;
     }
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    if args.is_empty() {
+        #[cfg(target_os = "linux")]
+        hbb_common::allow_err!(crate::platform::check_autostart_config());
+        if crate::check_process("--server", false) && !crate::check_process("--tray", true) {
+            hbb_common::allow_err!(crate::run_me(vec!["--tray"]));
+        }
+    }
+    #[cfg(not(debug_assertions))]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    register_breakdown_handler(breakdown_callback);
     #[cfg(target_os = "linux")]
     #[cfg(feature = "flutter")]
     {
-        crate::platform::linux::register_breakdown_handler();
         let (k, v) = ("LIBGL_ALWAYS_SOFTWARE", "true");
         if !hbb_common::config::Config::get_option("allow-always-software-render").is_empty() {
             std::env::set_var(k, v);
@@ -73,35 +86,21 @@ pub fn core_main() -> Option<Vec<String>> {
                 || (!click_setup && crate::platform::is_elevated(None).unwrap_or(false)));
         crate::portable_service::client::set_quick_support(_is_quick_support);
     }
-    #[cfg(debug_assertions)]
-    {
-        use hbb_common::env_logger::*;
-        init_from_env(Env::default().filter_or(DEFAULT_FILTER_ENV, "info"));
-    }
-    #[cfg(not(debug_assertions))]
-    {
-        let mut path = hbb_common::config::Config::log_path();
-        if args.len() > 0 && args[0].starts_with("--") {
-            let name = args[0].replace("--", "");
-            if !name.is_empty() {
-                path.push(name);
-            }
-        }
-        use flexi_logger::*;
-        if let Ok(x) = Logger::try_with_env_or_str("debug") {
-            // _async_logger_holder =
-            x.log_to_file(FileSpec::default().directory(path))
-                //.write_mode(WriteMode::Async)
-                .format(opt_format)
-                .rotate(
-                    Criterion::Age(Age::Day),
-                    Naming::Timestamps,
-                    Cleanup::KeepLogFiles(6),
-                )
-                .start()
-                .ok();
+    let mut log_name = "".to_owned();
+    if args.len() > 0 && args[0].starts_with("--") {
+        let name = args[0].replace("--", "");
+        if !name.is_empty() {
+            log_name = name;
         }
     }
+    hbb_common::init_log(false, &log_name);
+
+    // linux uni (url) go here.
+    #[cfg(all(target_os = "linux", feature = "flutter"))]
+    if args.len() > 0 && args[0].starts_with("rustdesk:") {
+        return try_send_by_dbus(args[0].clone());
+    }
+
     #[cfg(windows)]
     if !crate::platform::is_installed()
         && args.is_empty()
@@ -119,14 +118,19 @@ pub fn core_main() -> Option<Vec<String>> {
         crate::platform::elevate_or_run_as_system(click_setup, _is_elevate, _is_run_as_system);
         return None;
     }
+    #[cfg(all(feature = "flutter", feature = "plugin_framework"))]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    init_plugins(&args);
     if args.is_empty() {
+        #[cfg(windows)]
+        clipboard::ContextSend::enable(true);
         std::thread::spawn(move || crate::start_server(false));
     } else {
         #[cfg(windows)]
         {
             use crate::platform;
             if args[0] == "--uninstall" {
-                if let Err(err) = platform::uninstall_me() {
+                if let Err(err) = platform::uninstall_me(true) {
                     log::error!("Failed to uninstall: {}", err);
                 }
                 return None;
@@ -140,32 +144,21 @@ pub fn core_main() -> Option<Vec<String>> {
                     log::error!("Failed to before-uninstall: {}", err);
                 }
                 return None;
-            } else if args[0] == "--update" {
-                hbb_common::allow_err!(platform::update_me());
-                return None;
-            } else if args[0] == "--reinstall" {
-                hbb_common::allow_err!(platform::uninstall_me());
-                hbb_common::allow_err!(platform::install_me(
-                    "desktopicon startmenu",
-                    "".to_owned(),
-                    false,
-                    false,
-                ));
-                return None;
             } else if args[0] == "--silent-install" {
                 hbb_common::allow_err!(platform::install_me(
-                    "desktopicon startmenu",
+                    "desktopicon startmenu driverCert",
                     "".to_owned(),
                     true,
                     args.len() > 1,
                 ));
                 return None;
-            } else if args[0] == "--extract" {
-                #[cfg(feature = "with_rc")]
-                hbb_common::allow_err!(crate::rc::extract_resources(&args[1]));
+            } else if args[0] == "--install-cert" {
+                #[cfg(windows)]
+                hbb_common::allow_err!(crate::platform::windows::install_cert(&args[1]));
                 return None;
-            } else if args[0] == "--tray" {
-                crate::tray::start_tray();
+            } else if args[0] == "--uninstall-cert" {
+                #[cfg(windows)]
+                hbb_common::allow_err!(crate::platform::windows::uninstall_cert());
                 return None;
             } else if args[0] == "--portable-service" {
                 crate::platform::elevate_or_run_as_system(
@@ -183,34 +176,26 @@ pub fn core_main() -> Option<Vec<String>> {
                 std::fs::remove_file(&args[1]).ok();
                 return None;
             }
+        } else if args[0] == "--tray" {
+            if !crate::check_process("--tray", true) {
+                crate::tray::start_tray();
+            }
+            return None;
         } else if args[0] == "--service" {
             log::info!("start --service");
             crate::start_os_service();
             return None;
         } else if args[0] == "--server" {
             log::info!("start --server with user {}", crate::username());
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
             {
                 crate::start_server(true);
                 return None;
             }
             #[cfg(target_os = "macos")]
             {
-                std::thread::spawn(move || crate::start_server(true));
-                crate::platform::macos::hide_dock();
-                crate::tray::make_tray();
-                return None;
-            }
-            #[cfg(target_os = "linux")]
-            {
                 let handler = std::thread::spawn(move || crate::start_server(true));
-                // Show the tray in linux only when current user is a normal user
-                // [Note]
-                // As for GNOME, the tray cannot be shown in user's status bar.
-                // As for KDE, the tray can be shown without user's theme.
-                if !crate::platform::is_root() {
-                    crate::tray::start_tray();
-                }
+                crate::tray::start_tray();
                 // prevent server exit when encountering errors from tray
                 hbb_common::allow_err!(handler.join());
             }
@@ -237,6 +222,13 @@ pub fn core_main() -> Option<Vec<String>> {
                 }
             }
             return None;
+        } else if args[0] == "--get-id" {
+            if crate::platform::is_root() {
+                println!("{}", crate::ipc::get_id());
+            } else {
+                println!("Permission denied!");
+            }
+            return None;
         } else if args[0] == "--check-hwcodec-config" {
             #[cfg(feature = "hwcodec")]
             scrap::hwcodec::check_config();
@@ -244,11 +236,28 @@ pub fn core_main() -> Option<Vec<String>> {
         } else if args[0] == "--cm" {
             // call connection manager to establish connections
             // meanwhile, return true to call flutter window to show control panel
-            #[cfg(feature = "flutter")]
-            crate::flutter::connection_manager::start_listen_ipc_thread();
             crate::ui_interface::start_option_status_sync();
-            #[cfg(target_os = "macos")]
-            crate::platform::macos::hide_dock();
+        } else if args[0] == "--cm-no-ui" {
+            #[cfg(feature = "flutter")]
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            crate::flutter::connection_manager::start_cm_no_ui();
+            return None;
+        } else {
+            #[cfg(all(feature = "flutter", feature = "plugin_framework"))]
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            if args[0] == "--plugin-install" {
+                if args.len() == 2 {
+                    crate::plugin::change_uninstall_plugin(&args[1], false);
+                } else if args.len() == 3 {
+                    crate::plugin::install_plugin_with_url(&args[1], &args[2]);
+                }
+                return None;
+            } else if args[0] == "--plugin-uninstall" {
+                if args.len() == 2 {
+                    crate::plugin::change_uninstall_plugin(&args[1], true);
+                }
+                return None;
+            }
         }
     }
     //_async_logger_holder.map(|x| x.flush());
@@ -256,6 +265,23 @@ pub fn core_main() -> Option<Vec<String>> {
     return Some(flutter_args);
     #[cfg(not(feature = "flutter"))]
     return Some(args);
+}
+
+#[inline]
+#[cfg(all(feature = "flutter", feature = "plugin_framework"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn init_plugins(args: &Vec<String>) {
+    if args.is_empty() || "--server" == (&args[0] as &str) {
+        #[cfg(debug_assertions)]
+        let load_plugins = true;
+        #[cfg(not(debug_assertions))]
+        let load_plugins = crate::platform::is_installed();
+        if load_plugins {
+            crate::plugin::init();
+        }
+    } else if "--service" == (&args[0] as &str) {
+        hbb_common::allow_err!(crate::plugin::remove_uninstalled());
+    }
 }
 
 fn import_config(path: &str) {
@@ -293,13 +319,17 @@ fn import_config(path: &str) {
 #[cfg(feature = "flutter")]
 fn core_main_invoke_new_connection(mut args: std::env::Args) -> Option<Vec<String>> {
     args.position(|element| {
-        return element == "--connect";
-    })
-    .unwrap();
-    let peer_id = args.next().unwrap_or("".to_string());
+        return element == "--connect" || element == "--play";
+    })?;
+    let mut peer_id = args.next().unwrap_or("".to_string());
     if peer_id.is_empty() {
         eprintln!("please provide a valid peer id");
         return None;
+    }
+    let app_name = crate::get_app_name();
+    let ext = format!(".{}", app_name.to_lowercase());
+    if peer_id.ends_with(&ext) {
+        peer_id = peer_id.replace(&ext, "");
     }
     let mut switch_uuid = None;
     while let Some(item) = args.next() {
@@ -307,9 +337,13 @@ fn core_main_invoke_new_connection(mut args: std::env::Args) -> Option<Vec<Strin
             switch_uuid = args.next();
         }
     }
+    let mut param_array = vec![];
+    if switch_uuid.is_some() {
+        let switch_uuid = switch_uuid.map_or("".to_string(), |p| format!("switch_uuid={}", p));
+        param_array.push(switch_uuid);
+    }
 
-    let switch_uuid = switch_uuid.map_or("".to_string(), |p| format!("switch_uuid={}", p));
-    let params = vec![switch_uuid].join("&");
+    let params = param_array.join("&");
     let params_flag = if params.is_empty() { "" } else { "?" };
     #[allow(unused)]
     let uni_links = format!(
@@ -318,20 +352,8 @@ fn core_main_invoke_new_connection(mut args: std::env::Args) -> Option<Vec<Strin
     );
 
     #[cfg(target_os = "linux")]
-    {
-        use crate::dbus::invoke_new_connection;
+    return try_send_by_dbus(uni_links);
 
-        match invoke_new_connection(uni_links) {
-            Ok(()) => {
-                return None;
-            }
-            Err(err) => {
-                log::error!("{}", err.as_ref());
-                // return Some to invoke this new connection by self
-                return Some(Vec::new());
-            }
-        }
-    }
     #[cfg(windows)]
     {
         use winapi::um::winuser::WM_USER;
@@ -345,5 +367,27 @@ fn core_main_invoke_new_connection(mut args: std::env::Args) -> Option<Vec<Strin
         return if res { None } else { Some(Vec::new()) };
     }
     #[cfg(target_os = "macos")]
-    return Some(Vec::new());
+    {
+        return if let Err(_) = crate::ipc::send_url_scheme(uni_links) {
+            Some(Vec::new())
+        } else {
+            None
+        };
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "flutter"))]
+fn try_send_by_dbus(uni_links: String) -> Option<Vec<String>> {
+    use crate::dbus::invoke_new_connection;
+
+    match invoke_new_connection(uni_links) {
+        Ok(()) => {
+            return None;
+        }
+        Err(err) => {
+            log::error!("{}", err.as_ref());
+            // return Some to invoke this url by self
+            return Some(Vec::new());
+        }
+    }
 }

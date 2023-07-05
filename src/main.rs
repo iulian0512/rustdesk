@@ -1,10 +1,11 @@
-// Specify the Windows subsystem to eliminate console window.
-// Requires Rust 1.18.
-#![windows_subsystem = "windows"]
+#![cfg_attr(
+    all(not(debug_assertions), target_os = "windows"),
+    windows_subsystem = "windows"
+)]
 
 use librustdesk::*;
 
-#[cfg(any(target_os = "android", target_os = "ios"))]
+#[cfg(any(target_os = "android", target_os = "ios", feature = "flutter"))]
 fn main() {
     if !common::global_init() {
         return;
@@ -16,10 +17,19 @@ fn main() {
     common::global_clean();
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios", feature = "cli")))]
+#[cfg(not(any(
+    target_os = "android",
+    target_os = "ios",
+    feature = "cli",
+    feature = "flutter"
+)))]
 fn main() {
     if !common::global_init() {
         return;
+    }
+    #[cfg(all(windows, not(feature = "inline")))]
+    unsafe {
+        winapi::um::shellscalingapi::SetProcessDpiAwareness(2);
     }
     if let Some(args) = crate::core_main::core_main().as_mut() {
         ui::start(args);

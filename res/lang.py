@@ -19,8 +19,10 @@ def line_split(line):
     if len(toks) != 2:
         print(line)
         assert(0)
-    k = toks[0][2:]
-    v = toks[1][:-3]
+    # Replace fixed position.
+    # Because toks[1] may be v") or v"),
+    k = toks[0][toks[0].find('"') + 1:]
+    v = toks[1][:toks[1].rfind('"')]
     return k, v
 
 
@@ -34,13 +36,13 @@ def main():
 
 
 def expand():
-  for fn in glob.glob('./src/lang/*'):
+  for fn in glob.glob('./src/lang/*.rs'):
     lang = os.path.basename(fn)[:-3]
-    if lang in ['en','cn']: continue
+    if lang in ['en','template']: continue
     print(lang)
     dict = get_lang(lang)
     fw = open("./src/lang/%s.rs"%lang, "wt", encoding='utf8')
-    for line in open('./src/lang/cn.rs', encoding='utf8'):
+    for line in open('./src/lang/template.rs', encoding='utf8'):
       line_strip = line.strip()
       if line_strip.startswith('("'):
         k, v = line_split(line_strip)

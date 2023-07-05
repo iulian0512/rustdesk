@@ -5,29 +5,37 @@ import 'package:flutter_hbb/models/model.dart';
 import 'package:flutter_hbb/models/peer_model.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
 import 'package:get/get.dart';
+import 'package:bot_toast/bot_toast.dart';
 import 'package:http/http.dart' as http;
 
 import '../common.dart';
 
 class AbModel {
-  var abLoading = false.obs;
-  var abError = "".obs;
-  var tags = [].obs;
-  var peers = List<Peer>.empty(growable: true).obs;
+  final abLoading = false.obs;
+  final abError = "".obs;
+  final tags = [].obs;
+  final peers = List<Peer>.empty(growable: true).obs;
 
-  var selectedTags = List<String>.empty(growable: true).obs;
+  final selectedTags = List<String>.empty(growable: true).obs;
+  var initialized = false;
 
   WeakReference<FFI> parent;
 
   AbModel(this.parent);
 
-  Future<dynamic> pullAb() async {
+  Future<void> pullAb({force = true, quiet = false}) async {
     if (gFFI.userModel.userName.isEmpty) return;
-    abLoading.value = true;
-    abError.value = "";
+    if (abLoading.value) return;
+    if (!force && initialized) return;
+    if (!quiet) {
+      abLoading.value = true;
+      abError.value = "";
+    }
     final api = "${await bind.mainGetApiServer()}/api/ab/get";
     try {
-      final resp = await http.post(Uri.parse(api), headers: getHttpHeaders());
+      var authHeaders = getHttpHeaders();
+      authHeaders['Content-Type'] = "application/json";
+      final resp = await http.post(Uri.parse(api), headers: authHeaders);
       if (resp.body.isNotEmpty && resp.body.toLowerCase() != "null") {
         Map<String, dynamic> json = jsonDecode(resp.body);
         if (json.containsKey('error')) {
@@ -47,23 +55,20 @@ class AbModel {
             }
           }
         }
-        return resp.body;
-      } else {
-        return "";
       }
     } catch (err) {
-      err.printError();
       abError.value = err.toString();
     } finally {
       abLoading.value = false;
+      initialized = true;
     }
-    return null;
   }
 
   Future<void> reset() async {
     await bind.mainSetLocalOption(key: "selected-tags", value: '');
     tags.clear();
     peers.clear();
+    initialized = false;
   }
 
   void addId(String id, String alias, List<dynamic> tags) {
@@ -99,7 +104,6 @@ class AbModel {
   }
 
   Future<void> pushAb() async {
-    abLoading.value = true;
     final api = "${await bind.mainGetApiServer()}/api/ab";
     var authHeaders = getHttpHeaders();
     authHeaders['Content-Type'] = "application/json";
@@ -108,16 +112,11 @@ class AbModel {
       "data": jsonEncode({"tags": tags, "peers": peersJsonData})
     });
     try {
-      final resp =
-          await http.post(Uri.parse(api), headers: authHeaders, body: body);
-      abError.value = "";
-      await pullAb();
-      debugPrint("resp: ${resp.body}");
+      await http.post(Uri.parse(api), headers: authHeaders, body: body);
+      await pullAb(quiet: true);
     } catch (e) {
-      abError.value = e.toString();
-    } finally {
-      abLoading.value = false;
-    }
+      BotToast.showText(contentColor: Colors.red, text: e.toString());
+    } finally {}
   }
 
   Peer? find(String id) {

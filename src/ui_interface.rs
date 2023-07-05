@@ -1,59 +1,71 @@
-use std::{
-    collections::HashMap,
-    process::Child,
-    sync::{Arc, Mutex},
-    time::SystemTime,
-};
-
 #[cfg(any(target_os = "android", target_os = "ios"))]
 use hbb_common::password_security;
 use hbb_common::{
     allow_err,
     config::{self, Config, LocalConfig, PeerConfig},
-    directories_next, log, sleep,
-    tokio::{self, sync::mpsc, time},
+    directories_next, log, tokio,
 };
-
 use hbb_common::{
-    config::{RENDEZVOUS_PORT, RENDEZVOUS_TIMEOUT},
+    bytes::Bytes,
+    config::{CONNECT_TIMEOUT, RENDEZVOUS_PORT},
     futures::future::join_all,
-    protobuf::Message as _,
     rendezvous_proto::*,
 };
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+use hbb_common::{
+    sleep,
+    tokio::{sync::mpsc, time},
+};
+use serde_derive::Serialize;
+use std::{
+    collections::HashMap,
+    process::Child,
+    sync::{Arc, Mutex},
+};
 
+use crate::common::SOFTWARE_UPDATE_URL;
 #[cfg(feature = "flutter")]
 use crate::hbbs_http::account;
-use crate::{common::SOFTWARE_UPDATE_URL, ipc};
+#[cfg(not(any(target_os = "ios")))]
+use crate::ipc;
 
 type Message = RendezvousMessage;
 
 pub type Children = Arc<Mutex<(bool, HashMap<(String, String), Child>)>>;
-type Status = (i32, bool, i64, String); // (status_num, key_confirmed, mouse_time, id)
+
+#[derive(Clone, Debug, Serialize)]
+pub struct UiStatus {
+    pub status_num: i32,
+    #[cfg(not(feature = "flutter"))]
+    pub key_confirmed: bool,
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    pub mouse_time: i64,
+    #[cfg(not(feature = "flutter"))]
+    pub id: String,
+}
 
 lazy_static::lazy_static! {
-    static ref CHILDREN : Children = Default::default();
-    static ref UI_STATUS : Arc<Mutex<Status>> = Arc::new(Mutex::new((0, false, 0, "".to_owned())));
-    static ref OPTIONS : Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(Config::get_options()));
+    static ref UI_STATUS : Arc<Mutex<UiStatus>> = Arc::new(Mutex::new(UiStatus{
+        status_num: 0,
+        #[cfg(not(feature = "flutter"))]
+        key_confirmed: false,
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        mouse_time: 0,
+        #[cfg(not(feature = "flutter"))]
+        id: "".to_owned(),
+    }));
     static ref ASYNC_JOB_STATUS : Arc<Mutex<String>> = Default::default();
     static ref TEMPORARY_PASSWD : Arc<Mutex<String>> = Arc::new(Mutex::new("".to_owned()));
-    pub static ref OPTION_SYNCED : Arc<Mutex<bool>> = Default::default();
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 lazy_static::lazy_static! {
+    static ref OPTION_SYNCED: Arc<Mutex<bool>> = Default::default();
+    static ref OPTIONS : Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(Config::get_options()));
     pub static ref SENDER : Mutex<mpsc::UnboundedSender<ipc::Data>> = Mutex::new(check_connect_status(true));
 }
 
-#[inline]
-pub fn recent_sessions_updated() -> bool {
-    let mut children = CHILDREN.lock().unwrap();
-    if children.0 {
-        children.0 = false;
-        true
-    } else {
-        false
-    }
-}
+const INIT_ASYNC_JOB_STATUS: &str = " ";
 
 #[cfg(any(target_os = "android", target_os = "ios", feature = "flutter"))]
 #[inline]
@@ -65,18 +77,9 @@ pub fn get_id() -> String {
 }
 
 #[inline]
-pub fn get_remote_id() -> String {
-    LocalConfig::get_remote_id()
-}
-
-#[inline]
-pub fn set_remote_id(id: String) {
-    LocalConfig::set_remote_id(&id);
-}
-
-#[inline]
 pub fn goto_install() {
     allow_err!(crate::run_me(vec!["--install"]));
+    std::process::exit(0);
 }
 
 #[inline]
@@ -92,29 +95,7 @@ pub fn install_me(_options: String, _path: String, _silent: bool, _debug: bool) 
 
 #[inline]
 pub fn update_me(_path: String) {
-    #[cfg(target_os = "linux")]
-    {
-        std::process::Command::new("pkexec")
-            .args(&["apt", "install", "-f", &_path])
-            .spawn()
-            .ok();
-        std::fs::remove_file(&_path).ok();
-        crate::run_me(Vec::<&str>::new()).ok();
-    }
-    #[cfg(windows)]
-    {
-        let mut path = _path;
-        if path.is_empty() {
-            if let Ok(tmp) = std::env::current_exe() {
-                path = tmp.to_string_lossy().to_string();
-            }
-        }
-        std::process::Command::new(path)
-            .arg("--update")
-            .spawn()
-            .ok();
-        std::process::exit(0);
-    }
+    goto_install();
 }
 
 #[inline]
@@ -151,23 +132,19 @@ pub fn get_license() -> String {
 }
 
 #[inline]
-#[cfg(any(target_os = "linux", target_os = "windows"))]
-pub fn get_option_opt(key: &str) -> Option<String> {
-    OPTIONS.lock().unwrap().get(key).map(|x| x.clone())
-}
-
-#[inline]
-pub fn get_option(key: String) -> String {
-    get_option_(&key)
-}
-
-#[inline]
-fn get_option_(key: &str) -> String {
-    let map = OPTIONS.lock().unwrap();
-    if let Some(v) = map.get(key) {
-        v.to_owned()
-    } else {
-        "".to_owned()
+pub fn get_option<T: AsRef<str>>(key: T) -> String {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let map = OPTIONS.lock().unwrap();
+        if let Some(v) = map.get(key.as_ref()) {
+            v.to_owned()
+        } else {
+            "".to_owned()
+        }
+    }
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        Config::get_option(key.as_ref())
     }
 }
 
@@ -237,12 +214,21 @@ pub fn set_peer_option(id: String, name: String, value: String) {
 #[inline]
 pub fn using_public_server() -> bool {
     option_env!("RENDEZVOUS_SERVER").unwrap_or("").is_empty()
-        && crate::get_custom_rendezvous_server(get_option_("custom-rendezvous-server")).is_empty()
+        && crate::get_custom_rendezvous_server(get_option("custom-rendezvous-server")).is_empty()
 }
 
 #[inline]
 pub fn get_options() -> String {
-    let options = OPTIONS.lock().unwrap();
+    let options = {
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        {
+            OPTIONS.lock().unwrap()
+        }
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        {
+            Config::get_options()
+        }
+    };
     let mut m = serde_json::Map::new();
     for (k, v) in options.iter() {
         m.insert(k.into(), v.to_owned().into());
@@ -305,30 +291,51 @@ pub fn get_sound_inputs() -> Vec<String> {
 
 #[inline]
 pub fn set_options(m: HashMap<String, String>) {
-    *OPTIONS.lock().unwrap() = m.clone();
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    ipc::set_options(m).ok();
+    {
+        *OPTIONS.lock().unwrap() = m.clone();
+        ipc::set_options(m).ok();
+    }
     #[cfg(any(target_os = "android", target_os = "ios"))]
     Config::set_options(m);
 }
 
 #[inline]
 pub fn set_option(key: String, value: String) {
-    let mut options = OPTIONS.lock().unwrap();
-    #[cfg(target_os = "macos")]
     if &key == "stop-service" {
-        let is_stop = value == "Y";
-        if is_stop && crate::platform::macos::uninstall() {
-            return;
+        #[cfg(target_os = "macos")]
+        {
+            let is_stop = value == "Y";
+            if is_stop && crate::platform::macos::uninstall_service(true) {
+                return;
+            }
+        }
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        {
+            if crate::platform::is_installed() {
+                if value == "Y" {
+                    if crate::platform::uninstall_service(true) {
+                        return;
+                    }
+                } else {
+                    if crate::platform::install_service() {
+                        return;
+                    }
+                }
+                return;
+            }
         }
     }
-    if value.is_empty() {
-        options.remove(&key);
-    } else {
-        options.insert(key.clone(), value.clone());
-    }
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    ipc::set_options(options.clone()).ok();
+    {
+        let mut options = OPTIONS.lock().unwrap();
+        if value.is_empty() {
+            options.remove(&key);
+        } else {
+            options.insert(key.clone(), value.clone());
+        }
+        ipc::set_options(options.clone()).ok();
+    }
     #[cfg(any(target_os = "android", target_os = "ios"))]
     Config::set_option(key, value);
 }
@@ -362,8 +369,8 @@ pub fn get_socks() -> Vec<String> {
 }
 
 #[inline]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub fn set_socks(proxy: String, username: String, password: String) {
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     ipc::set_socks(config::Socks5Server {
         proxy,
         username,
@@ -371,6 +378,9 @@ pub fn set_socks(proxy: String, username: String, password: String) {
     })
     .ok();
 }
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+pub fn set_socks(_: String, _: String, _: String) {}
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 #[inline]
@@ -412,36 +422,15 @@ pub fn is_installed_lower_version() -> bool {
     return false;
     #[cfg(windows)]
     {
-        let installed_version = crate::platform::windows::get_installed_version();
-        let a = hbb_common::get_version_number(crate::VERSION);
-        let b = hbb_common::get_version_number(&installed_version);
-        return a > b;
+        let b = crate::platform::windows::get_reg("BuildDate");
+        return crate::BUILD_DATE.cmp(&b).is_gt();
     }
 }
 
 #[inline]
-pub fn closing(x: i32, y: i32, w: i32, h: i32) {
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    crate::server::input_service::fix_key_down_timeout_at_exit();
-    LocalConfig::set_size(x, y, w, h);
-}
-
-#[inline]
-pub fn get_size() -> Vec<i32> {
-    let s = LocalConfig::get_size();
-    let mut v = Vec::new();
-    v.push(s.0);
-    v.push(s.1);
-    v.push(s.2);
-    v.push(s.3);
-    v
-}
-
-#[inline]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub fn get_mouse_time() -> f64 {
-    let ui_status = UI_STATUS.lock().unwrap();
-    let res = ui_status.2 as f64;
-    return res;
+    UI_STATUS.lock().unwrap().mouse_time as f64
 }
 
 #[inline]
@@ -454,10 +443,9 @@ pub fn check_mouse_time() {
 }
 
 #[inline]
-pub fn get_connect_status() -> Status {
-    let ui_statue = UI_STATUS.lock().unwrap();
-    let res = ui_statue.clone();
-    res
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub fn get_connect_status() -> UiStatus {
+    UI_STATUS.lock().unwrap().clone()
 }
 
 #[inline]
@@ -508,51 +496,6 @@ pub fn store_fav(fav: Vec<String>) {
 }
 
 #[inline]
-pub fn get_recent_sessions() -> Vec<(String, SystemTime, PeerConfig)> {
-    PeerConfig::peers()
-}
-
-#[inline]
-#[cfg(not(any(target_os = "android", target_os = "ios", feature = "cli")))]
-pub fn get_icon() -> String {
-    crate::get_icon()
-}
-
-#[inline]
-pub fn remove_peer(id: String) {
-    PeerConfig::remove(&id);
-}
-
-#[inline]
-pub fn new_remote(id: String, remote_type: String) {
-    let mut lock = CHILDREN.lock().unwrap();
-    let args = vec![format!("--{}", remote_type), id.clone()];
-    let key = (id.clone(), remote_type.clone());
-    if let Some(c) = lock.1.get_mut(&key) {
-        if let Ok(Some(_)) = c.try_wait() {
-            lock.1.remove(&key);
-        } else {
-            if remote_type == "rdp" {
-                allow_err!(c.kill());
-                std::thread::sleep(std::time::Duration::from_millis(30));
-                c.try_wait().ok();
-                lock.1.remove(&key);
-            } else {
-                return;
-            }
-        }
-    }
-    match crate::run_me(args) {
-        Ok(child) => {
-            lock.1.insert(key, child);
-        }
-        Err(err) => {
-            log::error!("Failed to spawn remote: {}", err);
-        }
-    }
-}
-
-#[inline]
 pub fn is_process_trusted(_prompt: bool) -> bool {
     #[cfg(target_os = "macos")]
     return crate::platform::macos::is_process_trusted(_prompt);
@@ -591,15 +534,15 @@ pub fn get_error() -> String {
     #[cfg(target_os = "linux")]
     {
         let dtype = crate::platform::linux::get_display_server();
-        if "wayland" == dtype {
+        if crate::platform::linux::DISPLAY_SERVER_WAYLAND == dtype {
             return crate::server::wayland::common_get_error();
         }
-        if dtype != "x11" {
+        if dtype != crate::platform::linux::DISPLAY_SERVER_X11 {
             return format!(
                 "{} {}, {}",
-                t("Unsupported display server ".to_owned()),
+                crate::client::translate("Unsupported display server".to_owned()),
                 dtype,
-                t("x11 expected".to_owned()),
+                crate::client::translate("x11 expected".to_owned()),
             );
         }
     }
@@ -623,11 +566,6 @@ pub fn current_is_wayland() -> bool {
 }
 
 #[inline]
-pub fn get_software_update_url() -> String {
-    SOFTWARE_UPDATE_URL.lock().unwrap().clone()
-}
-
-#[inline]
 pub fn get_new_version() -> String {
     hbb_common::get_version_from_url(&*SOFTWARE_UPDATE_URL.lock().unwrap())
 }
@@ -643,42 +581,16 @@ pub fn get_app_name() -> String {
     crate::get_app_name()
 }
 
-#[inline]
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub fn get_software_ext() -> String {
-    #[cfg(windows)]
-    let p = "exe";
-    #[cfg(target_os = "macos")]
-    let p = "dmg";
-    #[cfg(target_os = "linux")]
-    let p = "deb";
-    p.to_owned()
-}
-
-#[inline]
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub fn get_software_store_path() -> String {
-    let mut p = std::env::temp_dir();
-    let name = SOFTWARE_UPDATE_URL
-        .lock()
-        .unwrap()
-        .split("/")
-        .last()
-        .map(|x| x.to_owned())
-        .unwrap_or(crate::get_app_name());
-    p.push(name);
-    format!("{}.{}", p.to_string_lossy(), get_software_ext())
-}
-
+#[cfg(windows)]
 #[inline]
 pub fn create_shortcut(_id: String) {
-    #[cfg(windows)]
     crate::platform::windows::create_shortcut(&_id).ok();
 }
 
 #[cfg(any(target_os = "android", target_os = "ios", feature = "flutter"))]
 #[inline]
 pub fn discover() {
+    #[cfg(not(any(target_os = "ios")))]
     std::thread::spawn(move || {
         allow_err!(crate::lan::discover());
     });
@@ -715,33 +627,34 @@ pub fn get_lan_peers() -> Vec<HashMap<&'static str, String>> {
 }
 
 #[inline]
-pub fn get_uuid() -> String {
-    base64::encode(hbb_common::get_uuid())
+pub fn remove_discovered(id: String) {
+    let mut peers = config::LanPeers::load().peers;
+    peers.retain(|x| x.id != id);
+    config::LanPeers::store(&peers);
 }
 
 #[inline]
-#[cfg(not(any(target_os = "android", target_os = "ios", feature = "cli")))]
-pub fn open_url(url: String) {
-    #[cfg(windows)]
-    let p = "explorer";
-    #[cfg(target_os = "macos")]
-    let p = "open";
-    #[cfg(target_os = "linux")]
-    let p = if std::path::Path::new("/usr/bin/firefox").exists() {
-        "firefox"
-    } else {
-        "xdg-open"
-    };
-    allow_err!(std::process::Command::new(p).arg(url).spawn());
+pub fn get_uuid() -> String {
+    crate::encode64(hbb_common::get_uuid())
+}
+
+#[inline]
+pub fn get_init_async_job_status() -> String {
+    INIT_ASYNC_JOB_STATUS.to_string()
+}
+
+#[inline]
+pub fn reset_async_job_status() {
+    *ASYNC_JOB_STATUS.lock().unwrap() = get_init_async_job_status();
 }
 
 #[cfg(any(target_os = "android", target_os = "ios", feature = "flutter"))]
 #[inline]
 pub fn change_id(id: String) {
-    *ASYNC_JOB_STATUS.lock().unwrap() = " ".to_owned();
+    reset_async_job_status();
     let old_id = get_id();
     std::thread::spawn(move || {
-        *ASYNC_JOB_STATUS.lock().unwrap() = change_id_shared(id, old_id).to_owned();
+        change_id_shared(id, old_id);
     });
 }
 
@@ -757,44 +670,68 @@ pub fn post_request(url: String, body: String, header: String) {
 }
 
 #[inline]
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub fn is_ok_change_id() -> bool {
-    machine_uid::get().is_ok()
-}
-
-#[inline]
 pub fn get_async_job_status() -> String {
     ASYNC_JOB_STATUS.lock().unwrap().clone()
 }
 
 #[inline]
-#[cfg(not(any(target_os = "android", target_os = "ios", feature = "cli")))]
-pub fn t(name: String) -> String {
-    crate::client::translate(name)
-}
-
-#[inline]
 pub fn get_langs() -> String {
-    crate::lang::LANGS.to_string()
+    use serde_json::json;
+    let mut x: Vec<(&str, String)> = crate::lang::LANGS
+        .iter()
+        .map(|a| (a.0, format!("{} ({})", a.1, a.0)))
+        .collect();
+    x.sort_by(|a, b| a.0.cmp(b.0));
+    json!(x).to_string()
 }
 
 #[inline]
 pub fn default_video_save_directory() -> String {
     let appname = crate::get_app_name();
+    // ui process can show it correctly Once vidoe process created it.
+    let try_create = |path: &std::path::Path| {
+        if !path.exists() {
+            std::fs::create_dir_all(path).ok();
+        }
+        if path.exists() {
+            path.to_string_lossy().to_string()
+        } else {
+            "".to_string()
+        }
+    };
 
     #[cfg(any(target_os = "android", target_os = "ios"))]
     if let Ok(home) = config::APP_HOME_DIR.read() {
         let mut path = home.to_owned();
         path.push_str("/RustDesk/ScreenRecord");
-        return path;
+        let dir = try_create(&std::path::Path::new(&path));
+        if !dir.is_empty() {
+            return dir;
+        }
     }
 
     if let Some(user) = directories_next::UserDirs::new() {
         if let Some(video_dir) = user.video_dir() {
-            return video_dir.join(appname).to_string_lossy().to_string();
+            let dir = try_create(&video_dir.join(&appname));
+            if !dir.is_empty() {
+                return dir;
+            }
+            if video_dir.exists() {
+                return video_dir.to_string_lossy().to_string();
+            }
+        }
+        if let Some(desktop_dir) = user.desktop_dir() {
+            if desktop_dir.exists() {
+                return desktop_dir.to_string_lossy().to_string();
+            }
+        }
+        let home = user.home_dir();
+        if home.exists() {
+            return home.to_string_lossy().to_string();
         }
     }
 
+    // same order as above
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     if let Some(home) = crate::platform::get_active_user_home() {
         let name = if cfg!(target_os = "macos") {
@@ -802,27 +739,41 @@ pub fn default_video_save_directory() -> String {
         } else {
             "Videos"
         };
-        return home.join(name).join(appname).to_string_lossy().to_string();
+        let video_dir = home.join(name);
+        let dir = try_create(&video_dir.join(&appname));
+        if !dir.is_empty() {
+            return dir;
+        }
+        if video_dir.exists() {
+            return video_dir.to_string_lossy().to_string();
+        }
+        let desktop_dir = home.join("Desktop");
+        if desktop_dir.exists() {
+            return desktop_dir.to_string_lossy().to_string();
+        }
+        if home.exists() {
+            return home.to_string_lossy().to_string();
+        }
     }
 
     if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            return dir.join("videos").to_string_lossy().to_string();
+        if let Some(parent) = exe.parent() {
+            let dir = try_create(&parent.join("videos"));
+            if !dir.is_empty() {
+                return dir;
+            }
+            // basically exist
+            return parent.to_string_lossy().to_string();
         }
     }
     "".to_owned()
 }
 
 #[inline]
-pub fn is_xfce() -> bool {
-    crate::platform::is_xfce()
-}
-
-#[inline]
 pub fn get_api_server() -> String {
     crate::get_api_server(
-        get_option_("api-server"),
-        get_option_("custom-rendezvous-server"),
+        get_option("api-server"),
+        get_option("custom-rendezvous-server"),
     )
 }
 
@@ -834,12 +785,11 @@ pub fn has_hwcodec() -> bool {
     return true;
 }
 
+#[cfg(feature = "flutter")]
 #[inline]
-pub fn is_release() -> bool {
-    #[cfg(not(debug_assertions))]
-    return true;
-    #[cfg(debug_assertions)]
-    return false;
+pub fn supported_hwdecodings() -> (bool, bool) {
+    let decoding = scrap::codec::Decoder::supported_decodings(None);
+    (decoding.ability_h264 > 0, decoding.ability_h265 > 0)
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -859,10 +809,10 @@ pub fn is_root() -> bool {
 pub fn check_super_user_permission() -> bool {
     #[cfg(feature = "flatpak")]
     return true;
-    #[cfg(any(windows, target_os = "linux"))]
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     return crate::platform::check_super_user_permission().unwrap_or(false);
-    #[cfg(not(any(windows, target_os = "linux")))]
-    true
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    return true;
 }
 
 #[allow(dead_code)]
@@ -888,14 +838,15 @@ pub fn check_zombie(children: Children) {
     }
 }
 
+// Make sure `SENDER` is inited here.
+#[inline]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub fn start_option_status_sync() {
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    {
-        let _sender = SENDER.lock().unwrap();
-    }
+    let _sender = SENDER.lock().unwrap();
 }
 
 // not call directly
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn check_connect_status(reconnect: bool) -> mpsc::UnboundedSender<ipc::Data> {
     let (tx, rx) = mpsc::unbounded_channel::<ipc::Data>();
     std::thread::spawn(move || check_connect_status_(reconnect, rx));
@@ -903,8 +854,8 @@ fn check_connect_status(reconnect: bool) -> mpsc::UnboundedSender<ipc::Data> {
 }
 
 #[cfg(feature = "flutter")]
-pub fn account_auth(op: String, id: String, uuid: String) {
-    account::OidcSession::account_auth(op, id, uuid);
+pub fn account_auth(op: String, id: String, uuid: String, remember_me: bool) {
+    account::OidcSession::account_auth(op, id, uuid, remember_me);
 }
 
 #[cfg(feature = "flutter")]
@@ -917,14 +868,47 @@ pub fn account_auth_result() -> String {
     serde_json::to_string(&account::OidcSession::get_result()).unwrap_or_default()
 }
 
+#[cfg(feature = "flutter")]
+pub fn set_user_default_option(key: String, value: String) {
+    use hbb_common::config::UserDefaultConfig;
+    UserDefaultConfig::load().set(key, value);
+}
+
+#[cfg(feature = "flutter")]
+pub fn get_user_default_option(key: String) -> String {
+    use hbb_common::config::UserDefaultConfig;
+    UserDefaultConfig::load().get(&key)
+}
+
+pub fn get_fingerprint() -> String {
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    if Config::get_key_confirmed() {
+        return crate::common::pk_to_fingerprint(Config::get_key_pair().1);
+    } else {
+        return "".to_owned();
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    return ipc::get_fingerprint();
+}
+
+pub fn get_hostname() -> String {
+    crate::common::hostname()
+}
+
 // notice: avoiding create ipc connection repeatedly,
 // because windows named pipe has serious memory leak issue.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 #[tokio::main(flavor = "current_thread")]
 async fn check_connect_status_(reconnect: bool, rx: mpsc::UnboundedReceiver<ipc::Data>) {
+    #[cfg(not(feature = "flutter"))]
     let mut key_confirmed = false;
     let mut rx = rx;
     let mut mouse_time = 0;
+    #[cfg(not(feature = "flutter"))]
     let mut id = "".to_owned();
+    #[cfg(target_os = "windows")]
+    let mut enable_file_transfer = "".to_owned();
+
     loop {
         if let Ok(mut c) = ipc::connect(1000, "").await {
             let mut timer = time::interval(time::Duration::from_secs(1));
@@ -936,27 +920,51 @@ async fn check_connect_status_(reconnect: bool, rx: mpsc::UnboundedReceiver<ipc:
                                 log::error!("ipc connection closed: {}", err);
                                 break;
                             }
+                            #[cfg(not(any(target_os = "android", target_os = "ios")))]
                             Ok(Some(ipc::Data::MouseMoveTime(v))) => {
                                 mouse_time = v;
-                                UI_STATUS.lock().unwrap().2 = v;
+                                UI_STATUS.lock().unwrap().mouse_time = v;
                             }
                             Ok(Some(ipc::Data::Options(Some(v)))) => {
                                 *OPTIONS.lock().unwrap() = v;
                                 *OPTION_SYNCED.lock().unwrap() = true;
+
+                                #[cfg(target_os="windows")]
+                                {
+                                    let b = OPTIONS.lock().unwrap().get("enable-file-transfer").map(|x| x.to_string()).unwrap_or_default();
+                                    if b != enable_file_transfer {
+                                        clipboard::ContextSend::enable(b.is_empty());
+                                        enable_file_transfer = b;
+                                    }
+                                }
                             }
                             Ok(Some(ipc::Data::Config((name, Some(value))))) => {
                                 if name == "id" {
-                                    id = value;
+                                    #[cfg(not(feature = "flutter"))]
+                                    {
+                                        id = value;
+                                    }
                                 } else if name == "temporary-password" {
                                     *TEMPORARY_PASSWD.lock().unwrap() = value;
                                 }
                             }
-                            Ok(Some(ipc::Data::OnlineStatus(Some((mut x, c))))) => {
+                            Ok(Some(ipc::Data::OnlineStatus(Some((mut x, _c))))) => {
                                 if x > 0 {
                                     x = 1
                                 }
-                                key_confirmed = c;
-                                *UI_STATUS.lock().unwrap() = (x as _, key_confirmed, mouse_time, id.clone());
+                                #[cfg(not(feature = "flutter"))]
+                                {
+                                    key_confirmed = _c;
+                                }
+                                *UI_STATUS.lock().unwrap() = UiStatus {
+                                    status_num: x as _,
+                                    #[cfg(not(feature = "flutter"))]
+                                    key_confirmed: _c,
+                                    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                                    mouse_time,
+                                    #[cfg(not(feature = "flutter"))]
+                                    id: id.clone(),
+                                };
                             }
                             _ => {}
                         }
@@ -980,17 +988,33 @@ async fn check_connect_status_(reconnect: bool, rx: mpsc::UnboundedReceiver<ipc:
                 .insert("ipc-closed".to_owned(), "Y".to_owned());
             break;
         }
-        *UI_STATUS.lock().unwrap() = (-1, key_confirmed, mouse_time, id.clone());
+        *UI_STATUS.lock().unwrap() = UiStatus {
+            status_num: -1,
+            #[cfg(not(feature = "flutter"))]
+            key_confirmed,
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            mouse_time,
+            #[cfg(not(feature = "flutter"))]
+            id: id.clone(),
+        };
         sleep(1.).await;
     }
 }
 
 #[allow(dead_code)]
 pub fn option_synced() -> bool {
-    OPTION_SYNCED.lock().unwrap().clone()
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        OPTION_SYNCED.lock().unwrap().clone()
+    }
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        true
+    }
 }
 
-#[cfg(any(target_os = "android", target_os = "ios", feature = "flutter"))]
+#[cfg(any(target_os = "android", feature = "flutter"))]
+#[cfg(not(any(target_os = "ios")))]
 #[tokio::main(flavor = "current_thread")]
 pub(crate) async fn send_to_cm(data: &ipc::Data) {
     if let Ok(mut c) = ipc::connect(1000, "_cm").await {
@@ -1001,16 +1025,26 @@ pub(crate) async fn send_to_cm(data: &ipc::Data) {
 const INVALID_FORMAT: &'static str = "Invalid format";
 const UNKNOWN_ERROR: &'static str = "Unknown error";
 
+#[inline]
 #[tokio::main(flavor = "current_thread")]
-pub async fn change_id_shared(id: String, old_id: String) -> &'static str {
+pub async fn change_id_shared(id: String, old_id: String) {
+    *ASYNC_JOB_STATUS.lock().unwrap() = change_id_shared_(id, old_id).await.to_owned();
+}
+
+pub async fn change_id_shared_(id: String, old_id: String) -> &'static str {
     if !hbb_common::is_valid_custom_id(&id) {
         return INVALID_FORMAT;
     }
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    let uuid = machine_uid::get().unwrap_or("".to_owned());
+    let uuid = Bytes::from(
+        hbb_common::machine_uid::get()
+            .unwrap_or("".to_owned())
+            .as_bytes()
+            .to_vec(),
+    );
     #[cfg(any(target_os = "android", target_os = "ios"))]
-    let uuid = base64::encode(hbb_common::get_uuid());
+    let uuid = Bytes::from(hbb_common::get_uuid());
 
     if uuid.is_empty() {
         log::error!("Failed to change id, uuid is_empty");
@@ -1054,11 +1088,11 @@ async fn check_id(
     rendezvous_server: String,
     old_id: String,
     id: String,
-    uuid: String,
+    uuid: Bytes,
 ) -> &'static str {
     if let Ok(mut socket) = hbb_common::socket_client::connect_tcp(
         crate::check_port(rendezvous_server, RENDEZVOUS_PORT),
-        RENDEZVOUS_TIMEOUT,
+        CONNECT_TIMEOUT,
     )
     .await
     {
@@ -1066,39 +1100,39 @@ async fn check_id(
         msg_out.set_register_pk(RegisterPk {
             old_id,
             id,
-            uuid: uuid.into(),
+            uuid,
             ..Default::default()
         });
         let mut ok = false;
         if socket.send(&msg_out).await.is_ok() {
-            if let Some(Ok(bytes)) = socket.next_timeout(3_000).await {
-                if let Ok(msg_in) = RendezvousMessage::parse_from_bytes(&bytes) {
-                    match msg_in.union {
-                        Some(rendezvous_message::Union::RegisterPkResponse(rpr)) => {
-                            match rpr.result.enum_value_or_default() {
-                                register_pk_response::Result::OK => {
-                                    ok = true;
-                                }
-                                register_pk_response::Result::ID_EXISTS => {
-                                    return "Not available";
-                                }
-                                register_pk_response::Result::TOO_FREQUENT => {
-                                    return "Too frequent";
-                                }
-                                register_pk_response::Result::NOT_SUPPORT => {
-                                    return "server_not_support";
-                                }
-                                register_pk_response::Result::SERVER_ERROR => {
-                                    return "Server error";
-                                }
-                                register_pk_response::Result::INVALID_ID_FORMAT => {
-                                    return INVALID_FORMAT;
-                                }
-                                _ => {}
+            if let Some(msg_in) =
+                crate::common::get_next_nonkeyexchange_msg(&mut socket, None).await
+            {
+                match msg_in.union {
+                    Some(rendezvous_message::Union::RegisterPkResponse(rpr)) => {
+                        match rpr.result.enum_value_or_default() {
+                            register_pk_response::Result::OK => {
+                                ok = true;
                             }
+                            register_pk_response::Result::ID_EXISTS => {
+                                return "Not available";
+                            }
+                            register_pk_response::Result::TOO_FREQUENT => {
+                                return "Too frequent";
+                            }
+                            register_pk_response::Result::NOT_SUPPORT => {
+                                return "server_not_support";
+                            }
+                            register_pk_response::Result::SERVER_ERROR => {
+                                return "Server error";
+                            }
+                            register_pk_response::Result::INVALID_ID_FORMAT => {
+                                return INVALID_FORMAT;
+                            }
+                            _ => {}
                         }
-                        _ => {}
                     }
+                    _ => {}
                 }
             }
         }
@@ -1109,4 +1143,13 @@ async fn check_id(
         return "Failed to connect to rendezvous server";
     }
     ""
+}
+
+// if it's relay id, return id processed, otherwise return original id
+pub fn handle_relay_id(id: String) -> String {
+    if id.ends_with(r"\r") || id.ends_with(r"/r") {
+        id[0..id.len() - 2].to_string()
+    } else {
+        id
+    }
 }

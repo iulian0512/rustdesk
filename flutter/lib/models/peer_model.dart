@@ -14,6 +14,13 @@ class Peer {
   String rdpUsername;
   bool online = false;
 
+  String getId() {
+    if (alias != '') {
+      return alias;
+    }
+    return id;
+  }
+
   Peer.fromJson(Map<String, dynamic> json)
       : id = json['id'] ?? '',
         username = json['username'] ?? '',
@@ -65,10 +72,13 @@ class Peer {
         );
 }
 
+enum UpdateEvent { online, load }
+
 class Peers extends ChangeNotifier {
   final String name;
   final String loadEvent;
   List<Peer> peers;
+  UpdateEvent event = UpdateEvent.load;
   static const _cbQueryOnlines = 'callback_query_onlines';
 
   Peers({required this.name, required this.peers, required this.loadEvent}) {
@@ -116,6 +126,7 @@ class Peers extends ChangeNotifier {
       }
     });
 
+    event = UpdateEvent.online;
     notifyListeners();
   }
 
@@ -126,6 +137,7 @@ class Peers extends ChangeNotifier {
       final state = onlineStates[peer.id];
       peer.online = state != null && state != false;
     }
+    event = UpdateEvent.load;
     notifyListeners();
   }
 

@@ -10,16 +10,19 @@ import 'package:flutter_hbb/desktop/pages/desktop_home_page.dart';
 import 'package:flutter_hbb/desktop/pages/desktop_tab_page.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
 import 'package:flutter_hbb/models/server_model.dart';
+import 'package:flutter_hbb/plugin/manager.dart';
+import 'package:flutter_hbb/plugin/widgets/desktop_settings.dart';
 import 'package:get/get.dart';
 import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:url_launcher/url_launcher_string.dart';
 import 'package:flutter_hbb/desktop/widgets/scroll_wrapper.dart';
+import 'package:window_manager/window_manager.dart';
 
 import '../../common/widgets/dialog.dart';
 import '../../common/widgets/login.dart';
 
-const double _kTabWidth = 235;
+const double _kTabWidth = 200;
 const double _kTabHeight = 42;
 const double _kCardFixedWidth = 540;
 const double _kCardLeftMargin = 15;
@@ -33,6 +36,7 @@ const double _kContentFontSize = 15;
 const Color _accentColor = MyTheme.accent;
 const String _kSettingPageControllerTag = 'settingPageController';
 const String _kSettingPageIndexTag = 'settingPageIndex';
+const int _kPageCount = 6;
 
 class _TabInfo {
   late final String label;
@@ -51,7 +55,7 @@ class DesktopSettingPage extends StatefulWidget {
   State<DesktopSettingPage> createState() => _DesktopSettingPageState();
 
   static void switch2page(int page) {
-    if (page >= 5) return;
+    if (page >= _kPageCount) return;
     try {
       if (Get.isRegistered<PageController>(tag: _kSettingPageControllerTag)) {
         DesktopTabPage.onAddSetting(initialPage: page);
@@ -70,15 +74,6 @@ class DesktopSettingPage extends StatefulWidget {
 
 class _DesktopSettingPageState extends State<DesktopSettingPage>
     with TickerProviderStateMixin, AutomaticKeepAliveClientMixin {
-  final List<_TabInfo> settingTabs = <_TabInfo>[
-    _TabInfo('General', Icons.settings_outlined, Icons.settings),
-    _TabInfo('Security', Icons.enhanced_encryption_outlined,
-        Icons.enhanced_encryption),
-    _TabInfo('Network', Icons.link_outlined, Icons.link),
-    _TabInfo('Account', Icons.person_outline, Icons.person),
-    _TabInfo('About', Icons.info_outline, Icons.info)
-  ];
-
   late PageController controller;
   late RxInt selectedIndex;
 
@@ -88,7 +83,8 @@ class _DesktopSettingPageState extends State<DesktopSettingPage>
   @override
   void initState() {
     super.initState();
-    selectedIndex = (widget.initialPage < 5 ? widget.initialPage : 0).obs;
+    selectedIndex =
+        (widget.initialPage < _kPageCount ? widget.initialPage : 0).obs;
     Get.put<RxInt>(selectedIndex, tag: _kSettingPageIndexTag);
     controller = PageController(initialPage: widget.initialPage);
     Get.put<PageController>(controller, tag: _kSettingPageControllerTag);
@@ -101,11 +97,44 @@ class _DesktopSettingPageState extends State<DesktopSettingPage>
     Get.delete<RxInt>(tag: _kSettingPageIndexTag);
   }
 
+  List<_TabInfo> _settingTabs() {
+    final List<_TabInfo> settingTabs = <_TabInfo>[
+      _TabInfo('General', Icons.settings_outlined, Icons.settings),
+      _TabInfo('Security', Icons.enhanced_encryption_outlined,
+          Icons.enhanced_encryption),
+      _TabInfo('Network', Icons.link_outlined, Icons.link),
+      _TabInfo(
+          'Display', Icons.desktop_windows_outlined, Icons.desktop_windows),
+      _TabInfo('Account', Icons.person_outline, Icons.person),
+      _TabInfo('About', Icons.info_outline, Icons.info)
+    ];
+    if (bind.pluginFeatureIsEnabled()) {
+      settingTabs.insert(
+          4, _TabInfo('Plugin', Icons.extension_outlined, Icons.extension));
+    }
+    return settingTabs;
+  }
+
+  List<Widget> _children() {
+    final children = [
+      _General(),
+      _Safety(),
+      _Network(),
+      _Display(),
+      _Account(),
+      _About(),
+    ];
+    if (bind.pluginFeatureIsEnabled()) {
+      children.insert(4, _Plugin());
+    }
+    return children;
+  }
+
   @override
   Widget build(BuildContext context) {
     super.build(context);
     return Scaffold(
-      backgroundColor: Theme.of(context).backgroundColor,
+      backgroundColor: Theme.of(context).colorScheme.background,
       body: Row(
         children: <Widget>[
           SizedBox(
@@ -113,11 +142,11 @@ class _DesktopSettingPageState extends State<DesktopSettingPage>
             child: Column(
               children: [
                 _header(),
-                Flexible(child: _listView(tabs: settingTabs)),
+                Flexible(child: _listView(tabs: _settingTabs())),
               ],
             ),
           ),
-          const VerticalDivider(thickness: 1, width: 1),
+          const VerticalDivider(width: 1),
           Expanded(
             child: Container(
               color: Theme.of(context).scaffoldBackgroundColor,
@@ -125,14 +154,8 @@ class _DesktopSettingPageState extends State<DesktopSettingPage>
                   scrollController: controller,
                   child: PageView(
                     controller: controller,
-                    physics: NeverScrollableScrollPhysics(),
-                    children: const [
-                      _General(),
-                      _Safety(),
-                      _Network(),
-                      _Account(),
-                      _About(),
-                    ],
+                    physics: DraggableNeverScrollableScrollPhysics(),
+                    children: _children(),
                   )),
             ),
           )
@@ -166,7 +189,7 @@ class _DesktopSettingPageState extends State<DesktopSettingPage>
     return DesktopScrollWrapper(
         scrollController: scrollController,
         child: ListView(
-          physics: NeverScrollableScrollPhysics(),
+          physics: DraggableNeverScrollableScrollPhysics(),
           controller: scrollController,
           children: tabs
               .asMap()
@@ -224,15 +247,19 @@ class _General extends StatefulWidget {
 }
 
 class _GeneralState extends State<_General> {
+  final RxBool serviceStop = Get.find<RxBool>(tag: 'stop-service');
+  RxBool serviceBtnEabled = true.obs;
+
   @override
   Widget build(BuildContext context) {
     final scrollController = ScrollController();
     return DesktopScrollWrapper(
         scrollController: scrollController,
         child: ListView(
-          physics: NeverScrollableScrollPhysics(),
+          physics: DraggableNeverScrollableScrollPhysics(),
           controller: scrollController,
           children: [
+            service(),
             theme(),
             hwcodec(),
             audio(context),
@@ -269,6 +296,21 @@ class _GeneralState extends State<_General> {
     ]);
   }
 
+  Widget service() {
+    return _Card(title: 'Service', children: [
+      Obx(() => _Button(serviceStop.value ? 'Start' : 'Stop', () {
+            () async {
+              serviceBtnEabled.value = false;
+              await start_service(serviceStop.value);
+              // enable the button after 1 second
+              Future.delayed(const Duration(seconds: 1), () {
+                serviceBtnEabled.value = true;
+              });
+            }();
+          }, enabled: serviceBtnEabled.value))
+    ]);
+  }
+
   Widget other() {
     return _Card(title: 'Other', children: [
       _OptionCheckBox(context, 'Confirm before closing multiple tabs',
@@ -297,7 +339,7 @@ class _GeneralState extends State<_General> {
 
   Widget audio(BuildContext context) {
     String getDefault() {
-      if (Platform.isWindows) return 'System Sound';
+      if (Platform.isWindows) return translate('System Sound');
       return '';
     }
 
@@ -315,10 +357,10 @@ class _GeneralState extends State<_General> {
       bind.mainSetOption(key: 'audio-input', value: device);
     }
 
-    return _futureBuilder(future: () async {
+    return futureBuilder(future: () async {
       List<String> devices = (await bind.mainGetSoundInputs()).toList();
       if (Platform.isWindows) {
-        devices.insert(0, 'System Sound');
+        devices.insert(0, translate('System Sound'));
       }
       String current = await getValue();
       return {'devices': devices, 'current': current};
@@ -342,7 +384,7 @@ class _GeneralState extends State<_General> {
   }
 
   Widget record(BuildContext context) {
-    return _futureBuilder(future: () async {
+    return futureBuilder(future: () async {
       String customDirectory =
           await bind.mainGetOption(key: 'video-save-directory');
       String defaultDirectory = await bind.mainDefaultVideoSaveDirectory();
@@ -377,8 +419,13 @@ class _GeneralState extends State<_General> {
             ),
             ElevatedButton(
                     onPressed: () async {
+                      String? initialDirectory;
+                      if (await Directory.fromUri(Uri.directory(dir))
+                          .exists()) {
+                        initialDirectory = dir;
+                      }
                       String? selectedDirectory = await FilePicker.platform
-                          .getDirectoryPath(initialDirectory: dir);
+                          .getDirectoryPath(initialDirectory: initialDirectory);
                       if (selectedDirectory != null) {
                         await bind.mainSetOption(
                             key: 'video-save-directory',
@@ -395,7 +442,7 @@ class _GeneralState extends State<_General> {
   }
 
   Widget language() {
-    return _futureBuilder(future: () async {
+    return futureBuilder(future: () async {
       String langs = await bind.mainGetLangs();
       String lang = bind.mainGetLocalOption(key: kCommConfKeyLang);
       return {'langs': langs, 'lang': lang};
@@ -406,7 +453,7 @@ class _GeneralState extends State<_General> {
       List<String> keys = langsMap.keys.toList();
       List<String> values = langsMap.values.toList();
       keys.insert(0, '');
-      values.insert(0, 'Default');
+      values.insert(0, translate('Default'));
       String currentKey = data['lang']!;
       if (!keys.contains(currentKey)) {
         currentKey = '';
@@ -429,7 +476,6 @@ enum _AccessMode {
   custom,
   full,
   view,
-  deny,
 }
 
 class _Safety extends StatefulWidget {
@@ -444,7 +490,6 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
   bool get wantKeepAlive => true;
   bool locked = bind.mainIsInstalled();
   final scrollController = ScrollController();
-  final RxBool serviceStop = Get.find<RxBool>(tag: 'stop-service');
 
   @override
   Widget build(BuildContext context) {
@@ -452,7 +497,7 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
     return DesktopScrollWrapper(
         scrollController: scrollController,
         child: SingleChildScrollView(
-            physics: NeverScrollableScrollPhysics(),
+            physics: DraggableNeverScrollableScrollPhysics(),
             controller: scrollController,
             child: Column(
               children: [
@@ -474,30 +519,27 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
   }
 
   Widget changeId() {
-    return _Button('Change ID', changeIdDialog, enabled: !locked);
+    return ChangeNotifierProvider.value(
+        value: gFFI.serverModel,
+        child: Consumer<ServerModel>(builder: ((context, model, child) {
+          return _Button('Change ID', changeIdDialog,
+              enabled: !locked && model.connectStatus > 0);
+        })));
   }
 
   Widget permissions(context) {
-    return Obx(() => _permissions(context, serviceStop.value));
-  }
-
-  Widget _permissions(context, bool stopService) {
     bool enabled = !locked;
-    return _futureBuilder(future: () async {
+    return futureBuilder(future: () async {
       return await bind.mainGetOption(key: 'access-mode');
     }(), hasData: (data) {
       String accessMode = data! as String;
       _AccessMode mode;
-      if (stopService) {
-        mode = _AccessMode.deny;
+      if (accessMode == 'full') {
+        mode = _AccessMode.full;
+      } else if (accessMode == 'view') {
+        mode = _AccessMode.view;
       } else {
-        if (accessMode == 'full') {
-          mode = _AccessMode.full;
-        } else if (accessMode == 'view') {
-          mode = _AccessMode.view;
-        } else {
-          mode = _AccessMode.custom;
-        }
+        mode = _AccessMode.custom;
       }
       String initialKey;
       bool? fakeValue;
@@ -514,10 +556,6 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
           initialKey = 'view';
           fakeValue = false;
           break;
-        case _AccessMode.deny:
-          initialKey = 'deny';
-          fakeValue = false;
-          break;
       }
 
       return _Card(title: 'Permissions', children: [
@@ -526,62 +564,42 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
               '',
               'full',
               'view',
-              'deny'
             ],
             values: [
               translate('Custom'),
               translate('Full Access'),
               translate('Screen Share'),
-              translate('Deny remote access'),
             ],
+            enabled: enabled,
             initialKey: initialKey,
             onChanged: (mode) async {
-              String modeValue;
-              bool stopService;
-              if (mode == 'deny') {
-                modeValue = '';
-                stopService = true;
-              } else {
-                modeValue = mode;
-                stopService = false;
-              }
-              await bind.mainSetOption(key: 'access-mode', value: modeValue);
-              await bind.mainSetOption(
-                  key: 'stop-service',
-                  value: bool2option('stop-service', stopService));
+              await bind.mainSetOption(key: 'access-mode', value: mode);
               setState(() {});
             }).marginOnly(left: _kContentHMargin),
-        Offstage(
-          offstage: mode == _AccessMode.deny,
-          child: Column(
-            children: [
-              _OptionCheckBox(
-                  context, 'Enable Keyboard/Mouse', 'enable-keyboard',
-                  enabled: enabled, fakeValue: fakeValue),
-              _OptionCheckBox(context, 'Enable Clipboard', 'enable-clipboard',
-                  enabled: enabled, fakeValue: fakeValue),
-              _OptionCheckBox(
-                  context, 'Enable File Transfer', 'enable-file-transfer',
-                  enabled: enabled, fakeValue: fakeValue),
-              _OptionCheckBox(context, 'Enable Audio', 'enable-audio',
-                  enabled: enabled, fakeValue: fakeValue),
-              _OptionCheckBox(context, 'Enable TCP Tunneling', 'enable-tunnel',
-                  enabled: enabled, fakeValue: fakeValue),
-              _OptionCheckBox(
-                  context, 'Enable Remote Restart', 'enable-remote-restart',
-                  enabled: enabled, fakeValue: fakeValue),
-              _OptionCheckBox(
-                  context, 'Enable Recording Session', 'enable-record-session',
-                  enabled: enabled, fakeValue: fakeValue),
-              _OptionCheckBox(
-                  context,
-                  'Enable remote configuration modification',
-                  'allow-remote-config-modification',
-                  enabled: enabled,
-                  fakeValue: fakeValue),
-            ],
-          ),
-        )
+        Column(
+          children: [
+            _OptionCheckBox(context, 'Enable Keyboard/Mouse', 'enable-keyboard',
+                enabled: enabled, fakeValue: fakeValue),
+            _OptionCheckBox(context, 'Enable Clipboard', 'enable-clipboard',
+                enabled: enabled, fakeValue: fakeValue),
+            _OptionCheckBox(
+                context, 'Enable File Transfer', 'enable-file-transfer',
+                enabled: enabled, fakeValue: fakeValue),
+            _OptionCheckBox(context, 'Enable Audio', 'enable-audio',
+                enabled: enabled, fakeValue: fakeValue),
+            _OptionCheckBox(context, 'Enable TCP Tunneling', 'enable-tunnel',
+                enabled: enabled, fakeValue: fakeValue),
+            _OptionCheckBox(
+                context, 'Enable Remote Restart', 'enable-remote-restart',
+                enabled: enabled, fakeValue: fakeValue),
+            _OptionCheckBox(
+                context, 'Enable Recording Session', 'enable-record-session',
+                enabled: enabled, fakeValue: fakeValue),
+            _OptionCheckBox(context, 'Enable remote configuration modification',
+                'allow-remote-config-modification',
+                enabled: enabled, fakeValue: fakeValue),
+          ],
+        ),
       ]);
     });
   }
@@ -646,7 +664,7 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
                                   context, onChanged != null)),
                         ),
                       ],
-                    ).paddingSymmetric(horizontal: 10),
+                    ).paddingOnly(right: 10),
                     onTap: () => onChanged?.call(value),
                   ))
               .toList();
@@ -663,6 +681,7 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
 
           return _Card(title: 'Password', children: [
             _ComboBox(
+              enabled: !locked,
               keys: modeKeys,
               values: modeValues,
               initialKey: modeInitialKey,
@@ -671,6 +690,7 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
             if (usePassword) radios[0],
             if (usePassword)
               _SubLabeledWidget(
+                  context,
                   'One-time password length',
                   Row(
                     children: [
@@ -697,11 +717,39 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
         child: _OptionCheckBox(context, 'Enable RDP', 'enable-rdp',
             enabled: enabled),
       ),
+      shareRdp(context, enabled),
       _OptionCheckBox(context, 'Deny LAN Discovery', 'enable-lan-discovery',
           reverse: true, enabled: enabled),
       ...directIp(context),
       whitelist(),
     ]);
+  }
+
+  shareRdp(BuildContext context, bool enabled) {
+    onChanged(bool b) async {
+      await bind.mainSetShareRdp(enable: b);
+      setState(() {});
+    }
+
+    bool value = bind.mainIsShareRdp();
+    return Offstage(
+      offstage: !(Platform.isWindows && bind.mainIsRdpServiceOpen()),
+      child: GestureDetector(
+          child: Row(
+            children: [
+              Checkbox(
+                      value: value,
+                      onChanged: enabled ? (_) => onChanged(!value) : null)
+                  .marginOnly(right: 5),
+              Expanded(
+                child: Text(translate('Enable RDP session sharing'),
+                    style:
+                        TextStyle(color: _disabledTextColor(context, enabled))),
+              )
+            ],
+          ).marginOnly(left: _kCheckBoxLeftMargin),
+          onTap: enabled ? () => onChanged(!value) : null),
+    );
   }
 
   List<Widget> directIp(BuildContext context) {
@@ -711,7 +759,7 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
     return [
       _OptionCheckBox(context, 'Enable Direct IP Access', 'direct-server',
           update: update, enabled: !locked),
-      _futureBuilder(
+      futureBuilder(
         future: () async {
           String enabled = await bind.mainGetOption(key: 'direct-server');
           String port = await bind.mainGetOption(key: 'direct-access-port');
@@ -724,11 +772,12 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
           controller.text = data['port'].toString();
           return Offstage(
             offstage: !enabled,
-            child: Row(children: [
-              _SubLabeledWidget(
-                'Port',
+            child: _SubLabeledWidget(
+              context,
+              'Port',
+              Row(children: [
                 SizedBox(
-                  width: 80,
+                  width: 95,
                   child: TextField(
                     controller: controller,
                     enabled: enabled && !locked,
@@ -737,31 +786,29 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
                       FilteringTextInputFormatter.allow(RegExp(
                           r'^([0-9]|[1-9]\d|[1-9]\d{2}|[1-9]\d{3}|[1-5]\d{4}|6[0-4]\d{3}|65[0-4]\d{2}|655[0-2]\d|6553[0-5])$')),
                     ],
-                    textAlign: TextAlign.end,
                     decoration: const InputDecoration(
                       hintText: '21118',
-                      border: InputBorder.none,
-                      contentPadding: EdgeInsets.only(right: 5),
-                      isCollapsed: true,
+                      contentPadding:
+                          EdgeInsets.symmetric(vertical: 12, horizontal: 12),
                     ),
-                  ),
+                  ).marginOnly(right: 15),
                 ),
-                enabled: enabled && !locked,
-              ).marginOnly(left: 5),
-              Obx(() => ElevatedButton(
-                    onPressed: applyEnabled.value && enabled && !locked
-                        ? () async {
-                            applyEnabled.value = false;
-                            await bind.mainSetOption(
-                                key: 'direct-access-port',
-                                value: controller.text);
-                          }
-                        : null,
-                    child: Text(
-                      translate('Apply'),
-                    ),
-                  ).marginOnly(left: 20))
-            ]),
+                Obx(() => ElevatedButton(
+                      onPressed: applyEnabled.value && enabled && !locked
+                          ? () async {
+                              applyEnabled.value = false;
+                              await bind.mainSetOption(
+                                  key: 'direct-access-port',
+                                  value: controller.text);
+                            }
+                          : null,
+                      child: Text(
+                        translate('Apply'),
+                      ),
+                    ))
+              ]),
+              enabled: enabled && !locked,
+            ),
           );
         },
       ),
@@ -770,7 +817,7 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
 
   Widget whitelist() {
     bool enabled = !locked;
-    return _futureBuilder(future: () async {
+    return futureBuilder(future: () async {
       return await bind.mainGetOption(key: 'whitelist');
     }(), hasData: (data) {
       RxBool hasWhitelist = (data as String).isNotEmpty.obs;
@@ -876,7 +923,7 @@ class _NetworkState extends State<_Network> with AutomaticKeepAliveClientMixin {
         scrollController: scrollController,
         child: ListView(
             controller: scrollController,
-            physics: NeverScrollableScrollPhysics(),
+            physics: DraggableNeverScrollableScrollPhysics(),
             children: [
               _lock(locked, 'Unlock Network Settings', () {
                 locked = false;
@@ -896,7 +943,7 @@ class _NetworkState extends State<_Network> with AutomaticKeepAliveClientMixin {
   }
 
   server(bool enabled) {
-    return _futureBuilder(future: () async {
+    return futureBuilder(future: () async {
       return await bind.mainGetOptions();
     }(), hasData: (data) {
       // Setting page is not modal, oldOptions should only be used when getting options, never when setting.
@@ -1039,11 +1086,274 @@ class _NetworkState extends State<_Network> with AutomaticKeepAliveClientMixin {
             Row(
               mainAxisAlignment: MainAxisAlignment.end,
               children: [_Button('Apply', submit, enabled: enabled)],
-            ).marginOnly(top: 15),
+            ).marginOnly(top: 10),
           ],
         )
       ]);
     });
+  }
+}
+
+class _Display extends StatefulWidget {
+  const _Display({Key? key}) : super(key: key);
+
+  @override
+  State<_Display> createState() => _DisplayState();
+}
+
+class _DisplayState extends State<_Display> {
+  @override
+  Widget build(BuildContext context) {
+    final scrollController = ScrollController();
+    return DesktopScrollWrapper(
+        scrollController: scrollController,
+        child: ListView(
+            controller: scrollController,
+            physics: DraggableNeverScrollableScrollPhysics(),
+            children: [
+              viewStyle(context),
+              scrollStyle(context),
+              imageQuality(context),
+              codec(context),
+              other(context),
+            ]).marginOnly(bottom: _kListViewBottomMargin));
+  }
+
+  Widget viewStyle(BuildContext context) {
+    final key = 'view_style';
+    onChanged(String value) async {
+      await bind.mainSetUserDefaultOption(key: key, value: value);
+      setState(() {});
+    }
+
+    final groupValue = bind.mainGetUserDefaultOption(key: key);
+    return _Card(title: 'Default View Style', children: [
+      _Radio(context,
+          value: kRemoteViewStyleOriginal,
+          groupValue: groupValue,
+          label: 'Scale original',
+          onChanged: onChanged),
+      _Radio(context,
+          value: kRemoteViewStyleAdaptive,
+          groupValue: groupValue,
+          label: 'Scale adaptive',
+          onChanged: onChanged),
+    ]);
+  }
+
+  Widget scrollStyle(BuildContext context) {
+    final key = 'scroll_style';
+    onChanged(String value) async {
+      await bind.mainSetUserDefaultOption(key: key, value: value);
+      setState(() {});
+    }
+
+    final groupValue = bind.mainGetUserDefaultOption(key: key);
+    return _Card(title: 'Default Scroll Style', children: [
+      _Radio(context,
+          value: kRemoteScrollStyleAuto,
+          groupValue: groupValue,
+          label: 'ScrollAuto',
+          onChanged: onChanged),
+      _Radio(context,
+          value: kRemoteScrollStyleBar,
+          groupValue: groupValue,
+          label: 'Scrollbar',
+          onChanged: onChanged),
+    ]);
+  }
+
+  Widget imageQuality(BuildContext context) {
+    final key = 'image_quality';
+    onChanged(String value) async {
+      await bind.mainSetUserDefaultOption(key: key, value: value);
+      setState(() {});
+    }
+
+    final groupValue = bind.mainGetUserDefaultOption(key: key);
+    final qualityKey = 'custom_image_quality';
+    final qualityValue =
+        (double.tryParse(bind.mainGetUserDefaultOption(key: qualityKey)) ??
+                50.0)
+            .obs;
+    final fpsKey = 'custom-fps';
+    final fpsValue =
+        (double.tryParse(bind.mainGetUserDefaultOption(key: fpsKey)) ?? 30.0)
+            .obs;
+    return _Card(title: 'Default Image Quality', children: [
+      _Radio(context,
+          value: kRemoteImageQualityBest,
+          groupValue: groupValue,
+          label: 'Good image quality',
+          onChanged: onChanged),
+      _Radio(context,
+          value: kRemoteImageQualityBalanced,
+          groupValue: groupValue,
+          label: 'Balanced',
+          onChanged: onChanged),
+      _Radio(context,
+          value: kRemoteImageQualityLow,
+          groupValue: groupValue,
+          label: 'Optimize reaction time',
+          onChanged: onChanged),
+      _Radio(context,
+          value: kRemoteImageQualityCustom,
+          groupValue: groupValue,
+          label: 'Custom',
+          onChanged: onChanged),
+      Offstage(
+        offstage: groupValue != kRemoteImageQualityCustom,
+        child: Column(
+          children: [
+            Obx(() => Row(
+                  children: [
+                    Slider(
+                      value: qualityValue.value,
+                      min: 10.0,
+                      max: 100.0,
+                      divisions: 18,
+                      onChanged: (double value) async {
+                        qualityValue.value = value;
+                        await bind.mainSetUserDefaultOption(
+                            key: qualityKey, value: value.toString());
+                      },
+                    ),
+                    SizedBox(
+                        width: 40,
+                        child: Text(
+                          '${qualityValue.value.round()}%',
+                          style: const TextStyle(fontSize: 15),
+                        )),
+                    SizedBox(
+                        width: 50,
+                        child: Text(
+                          translate('Bitrate'),
+                          style: const TextStyle(fontSize: 15),
+                        ))
+                  ],
+                )),
+            Obx(() => Row(
+                  children: [
+                    Slider(
+                      value: fpsValue.value,
+                      min: 5.0,
+                      max: 120.0,
+                      divisions: 23,
+                      onChanged: (double value) async {
+                        fpsValue.value = value;
+                        await bind.mainSetUserDefaultOption(
+                            key: fpsKey, value: value.toString());
+                      },
+                    ),
+                    SizedBox(
+                        width: 40,
+                        child: Text(
+                          '${fpsValue.value.round()}',
+                          style: const TextStyle(fontSize: 15),
+                        )),
+                    SizedBox(
+                        width: 50,
+                        child: Text(
+                          translate('FPS'),
+                          style: const TextStyle(fontSize: 15),
+                        ))
+                  ],
+                )),
+          ],
+        ),
+      )
+    ]);
+  }
+
+  Widget codec(BuildContext context) {
+    final key = 'codec-preference';
+    onChanged(String value) async {
+      await bind.mainSetUserDefaultOption(key: key, value: value);
+      setState(() {});
+    }
+
+    final groupValue = bind.mainGetUserDefaultOption(key: key);
+    var hwRadios = [];
+    try {
+      final Map codecsJson = jsonDecode(bind.mainSupportedHwdecodings());
+      final h264 = codecsJson['h264'] ?? false;
+      final h265 = codecsJson['h265'] ?? false;
+      if (h264) {
+        hwRadios.add(_Radio(context,
+            value: 'h264',
+            groupValue: groupValue,
+            label: 'H264',
+            onChanged: onChanged));
+      }
+      if (h265) {
+        hwRadios.add(_Radio(context,
+            value: 'h265',
+            groupValue: groupValue,
+            label: 'H265',
+            onChanged: onChanged));
+      }
+    } catch (e) {
+      debugPrint("failed to parse supported hwdecodings, err=$e");
+    }
+    return _Card(title: 'Default Codec', children: [
+      _Radio(context,
+          value: 'auto',
+          groupValue: groupValue,
+          label: 'Auto',
+          onChanged: onChanged),
+      _Radio(context,
+          value: 'vp8',
+          groupValue: groupValue,
+          label: 'VP8',
+          onChanged: onChanged),
+      _Radio(context,
+          value: 'vp9',
+          groupValue: groupValue,
+          label: 'VP9',
+          onChanged: onChanged),
+      _Radio(context,
+          value: 'av1',
+          groupValue: groupValue,
+          label: 'AV1',
+          onChanged: onChanged),
+      ...hwRadios,
+    ]);
+  }
+
+  Widget otherRow(String label, String key) {
+    final value = bind.mainGetUserDefaultOption(key: key) == 'Y';
+    onChanged(bool b) async {
+      await bind.mainSetUserDefaultOption(key: key, value: b ? 'Y' : '');
+      setState(() {});
+    }
+
+    return GestureDetector(
+        child: Row(
+          children: [
+            Checkbox(value: value, onChanged: (_) => onChanged(!value))
+                .marginOnly(right: 5),
+            Expanded(
+              child: Text(translate(label)),
+            )
+          ],
+        ).marginOnly(left: _kCheckBoxLeftMargin),
+        onTap: () => onChanged(!value));
+  }
+
+  Widget other(BuildContext context) {
+    return _Card(title: 'Other Default Options', children: [
+      otherRow('View Mode', 'view_only'),
+      otherRow('show_monitors_tip', 'show_monitors_toolbar'),
+      otherRow('Collapse toolbar', 'collapse_toolbar'),
+      otherRow('Show remote cursor', 'show_remote_cursor'),
+      otherRow('Zoom cursor', 'zoom-cursor'),
+      otherRow('Show quality monitor', 'show_quality_monitor'),
+      otherRow('Mute', 'disable_audio'),
+      otherRow('Allow file copy and paste', 'enable_file_transfer'),
+      otherRow('Disable clipboard', 'disable_clipboard'),
+      otherRow('Lock after session end', 'lock_after_session_end'),
+      otherRow('Privacy mode', 'privacy_mode'),
+    ]);
   }
 }
 
@@ -1061,12 +1371,130 @@ class _AccountState extends State<_Account> {
     return DesktopScrollWrapper(
         scrollController: scrollController,
         child: ListView(
-          physics: NeverScrollableScrollPhysics(),
+          physics: DraggableNeverScrollableScrollPhysics(),
           controller: scrollController,
           children: [
-            _Card(title: 'Account', children: [accountAction()]),
+            _Card(title: 'Account', children: [accountAction(), useInfo()]),
           ],
         ).marginOnly(bottom: _kListViewBottomMargin));
+  }
+
+  Widget accountAction() {
+    return Obx(() => _Button(
+        gFFI.userModel.userName.value.isEmpty ? 'Login' : 'Logout',
+        () => {
+              gFFI.userModel.userName.value.isEmpty
+                  ? loginDialog()
+                  : gFFI.userModel.logOut()
+            }));
+  }
+
+  Widget useInfo() {
+    text(String key, String value) {
+      return Align(
+        alignment: Alignment.centerLeft,
+        child: SelectionArea(child: Text('${translate(key)}: $value'))
+            .marginSymmetric(vertical: 4),
+      );
+    }
+
+    return Obx(() => Offstage(
+          offstage: gFFI.userModel.userName.value.isEmpty,
+          child: Column(
+            children: [
+              text('Username', gFFI.userModel.userName.value),
+              // text('Group', gFFI.groupModel.groupName.value),
+            ],
+          ),
+        )).marginOnly(left: 18, top: 16);
+  }
+}
+
+class _Checkbox extends StatefulWidget {
+  final String label;
+  final bool Function() getValue;
+  final Future<void> Function(bool) setValue;
+
+  const _Checkbox(
+      {Key? key,
+      required this.label,
+      required this.getValue,
+      required this.setValue})
+      : super(key: key);
+
+  @override
+  State<_Checkbox> createState() => _CheckboxState();
+}
+
+class _CheckboxState extends State<_Checkbox> {
+  var value = false;
+
+  @override
+  initState() {
+    super.initState();
+    value = widget.getValue();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    onChanged(bool b) async {
+      await widget.setValue(b);
+      setState(() {
+        value = widget.getValue();
+      });
+    }
+
+    return GestureDetector(
+      child: Row(
+        children: [
+          Checkbox(
+            value: value,
+            onChanged: (_) => onChanged(!value),
+          ).marginOnly(right: 5),
+          Expanded(
+            child: Text(translate(widget.label)),
+          )
+        ],
+      ).marginOnly(left: _kCheckBoxLeftMargin),
+      onTap: () => onChanged(!value),
+    );
+  }
+}
+
+class _Plugin extends StatefulWidget {
+  const _Plugin({Key? key}) : super(key: key);
+
+  @override
+  State<_Plugin> createState() => _PluginState();
+}
+
+class _PluginState extends State<_Plugin> {
+  @override
+  Widget build(BuildContext context) {
+    bind.pluginListReload();
+    final scrollController = ScrollController();
+    return DesktopScrollWrapper(
+      scrollController: scrollController,
+      child: ChangeNotifierProvider.value(
+        value: pluginManager,
+        child: Consumer<PluginManager>(builder: (context, model, child) {
+          return ListView(
+            physics: DraggableNeverScrollableScrollPhysics(),
+            controller: scrollController,
+            children: model.plugins.map((entry) => pluginCard(entry)).toList(),
+          ).marginOnly(bottom: _kListViewBottomMargin);
+        }),
+      ),
+    );
+  }
+
+  Widget pluginCard(PluginInfo plugin) {
+    return ChangeNotifierProvider.value(
+      value: plugin,
+      child: Consumer<PluginInfo>(
+        builder: (context, model, child) => DesktopSettingsCard(plugin: model),
+      ),
+    );
   }
 
   Widget accountAction() {
@@ -1090,22 +1518,29 @@ class _About extends StatefulWidget {
 class _AboutState extends State<_About> {
   @override
   Widget build(BuildContext context) {
-    return _futureBuilder(future: () async {
+    return futureBuilder(future: () async {
       final license = await bind.mainGetLicense();
       final version = await bind.mainGetVersion();
       final buildDate = await bind.mainGetBuildDate();
-      return {'license': license, 'version': version, 'buildDate': buildDate};
+      final fingerprint = await bind.mainGetFingerprint();
+      return {
+        'license': license,
+        'version': version,
+        'buildDate': buildDate,
+        'fingerprint': fingerprint
+      };
     }(), hasData: (data) {
       final license = data['license'].toString();
       final version = data['version'].toString();
       final buildDate = data['buildDate'].toString();
+      final fingerprint = data['fingerprint'].toString();
       const linkStyle = TextStyle(decoration: TextDecoration.underline);
       final scrollController = ScrollController();
       return DesktopScrollWrapper(
           scrollController: scrollController,
           child: SingleChildScrollView(
             controller: scrollController,
-            physics: NeverScrollableScrollPhysics(),
+            physics: DraggableNeverScrollableScrollPhysics(),
             child: _Card(title: '${translate('About')} RustDesk', children: [
               Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -1113,10 +1548,15 @@ class _AboutState extends State<_About> {
                   const SizedBox(
                     height: 8.0,
                   ),
-                  Text('${translate('Version')}: $version')
-                      .marginSymmetric(vertical: 4.0),
-                  Text('${translate('Build Date')}: $buildDate')
-                      .marginSymmetric(vertical: 4.0),
+                  SelectionArea(
+                      child: Text('${translate('Version')}: $version')
+                          .marginSymmetric(vertical: 4.0)),
+                  SelectionArea(
+                      child: Text('${translate('Build Date')}: $buildDate')
+                          .marginSymmetric(vertical: 4.0)),
+                  SelectionArea(
+                      child: Text('${translate('Fingerprint')}: $fingerprint')
+                          .marginSymmetric(vertical: 4.0)),
                   InkWell(
                       onTap: () {
                         launchUrlString('https://rustdesk.com/privacy');
@@ -1137,14 +1577,15 @@ class _AboutState extends State<_About> {
                     decoration: const BoxDecoration(color: Color(0xFF2c8cff)),
                     padding:
                         const EdgeInsets.symmetric(vertical: 24, horizontal: 8),
-                    child: Row(
+                    child: SelectionArea(
+                        child: Row(
                       children: [
                         Expanded(
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Text(
-                                'Copyright © 2022 Purslane Ltd.\n$license',
+                                'Copyright © 2023 Purslane Ltd.\n$license',
                                 style: const TextStyle(color: Colors.white),
                               ),
                               Text(
@@ -1157,7 +1598,7 @@ class _AboutState extends State<_About> {
                           ),
                         ),
                       ],
-                    ),
+                    )),
                   ).marginSymmetric(vertical: 4.0)
                 ],
               ).marginOnly(left: _kContentHMargin)
@@ -1221,7 +1662,7 @@ Widget _OptionCheckBox(BuildContext context, String label, String key,
     bool enabled = true,
     Icon? checkedIcon,
     bool? fakeValue}) {
-  return _futureBuilder(
+  return futureBuilder(
       future: bind.mainGetOption(key: key),
       hasData: (data) {
         bool value = option2bool(key, data.toString());
@@ -1338,61 +1779,20 @@ Widget _SubButton(String label, Function() onPressed, [bool enabled = true]) {
 }
 
 // ignore: non_constant_identifier_names
-Widget _SubLabeledWidget(String label, Widget child, {bool enabled = true}) {
-  RxBool hover = false.obs;
+Widget _SubLabeledWidget(BuildContext context, String label, Widget child,
+    {bool enabled = true}) {
   return Row(
     children: [
-      MouseRegion(
-          onEnter: (_) => hover.value = true,
-          onExit: (_) => hover.value = false,
-          child: Obx(
-            () {
-              return Container(
-                  height: 32,
-                  decoration: BoxDecoration(
-                      border: Border.all(
-                          color: hover.value && enabled
-                              ? const Color(0xFFD7D7D7)
-                              : const Color(0xFFCBCBCB),
-                          width: hover.value && enabled ? 2 : 1)),
-                  child: Row(
-                    children: [
-                      Container(
-                        height: 28,
-                        color: (hover.value && enabled)
-                            ? const Color(0xFFD7D7D7)
-                            : const Color(0xFFCBCBCB),
-                        alignment: Alignment.center,
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 5, vertical: 2),
-                        child: Text(
-                          '${translate(label)}: ',
-                          style: const TextStyle(fontWeight: FontWeight.w300),
-                        ),
-                      ).paddingAll(2),
-                      child,
-                    ],
-                  ));
-            },
-          )),
+      Text(
+        '${translate(label)}: ',
+        style: TextStyle(color: _disabledTextColor(context, enabled)),
+      ),
+      SizedBox(
+        width: 10,
+      ),
+      child,
     ],
   ).marginOnly(left: _kContentHSubMargin);
-}
-
-Widget _futureBuilder(
-    {required Future? future, required Widget Function(dynamic data) hasData}) {
-  return FutureBuilder(
-      future: future,
-      builder: (BuildContext context, AsyncSnapshot snapshot) {
-        if (snapshot.hasData) {
-          return hasData(snapshot.data!);
-        } else {
-          if (snapshot.hasError) {
-            debugPrint(snapshot.error.toString());
-          }
-          return Container();
-        }
-      });
 }
 
 Widget _lock(
@@ -1425,6 +1825,9 @@ Widget _lock(
                     if (checked) {
                       onUnlock();
                     }
+                    if (Platform.isMacOS) {
+                      await windowManager.show();
+                    }
                   },
                 ).marginSymmetric(horizontal: 2, vertical: 4),
               ).marginOnly(left: _kCardLeftMargin),
@@ -1443,33 +1846,27 @@ _LabeledTextField(
     bool secure) {
   return Row(
     children: [
-      Spacer(flex: 1),
+      ConstrainedBox(
+          constraints: const BoxConstraints(minWidth: 140),
+          child: Text(
+            '${translate(label)}:',
+            textAlign: TextAlign.right,
+            style: TextStyle(
+                fontSize: 16, color: _disabledTextColor(context, enabled)),
+          ).marginOnly(right: 10)),
       Expanded(
-        flex: 4,
-        child: Text(
-          '${translate(label)}:',
-          textAlign: TextAlign.right,
-          style: TextStyle(color: _disabledTextColor(context, enabled)),
-        ),
-      ),
-      Spacer(flex: 1),
-      Expanded(
-        flex: 10,
         child: TextField(
             controller: controller,
             enabled: enabled,
             obscureText: secure,
             decoration: InputDecoration(
-                isDense: true,
-                contentPadding: EdgeInsets.symmetric(vertical: 15),
                 errorText: errorText.isNotEmpty ? errorText : null),
             style: TextStyle(
               color: _disabledTextColor(context, enabled),
             )),
       ),
-      Spacer(flex: 1),
     ],
-  );
+  ).marginOnly(bottom: 8);
 }
 
 // ignore: must_be_immutable
@@ -1487,7 +1884,6 @@ class _ComboBox extends StatelessWidget {
     required this.values,
     required this.initialKey,
     required this.onChanged,
-    // ignore: unused_element
     this.enabled = true,
   }) : super(key: key);
 
@@ -1500,19 +1896,29 @@ class _ComboBox extends StatelessWidget {
     var ref = values[index].obs;
     current = keys[index];
     return Container(
-      decoration: BoxDecoration(border: Border.all(color: MyTheme.border)),
-      height: 30,
+      decoration: BoxDecoration(
+        border: Border.all(
+          color: enabled
+              ? MyTheme.color(context).border2 ?? MyTheme.border
+              : MyTheme.border,
+        ),
+        borderRadius:
+            BorderRadius.circular(8), //border raiuds of dropdown button
+      ),
+      height: 42, // should be the height of a TextField
       child: Obx(() => DropdownButton<String>(
             isExpanded: true,
             value: ref.value,
             elevation: 16,
-            underline: Container(
-              height: 25,
-            ),
+            underline: Container(),
+            style: TextStyle(
+                color: enabled
+                    ? Theme.of(context).textTheme.titleMedium?.color
+                    : _disabledTextColor(context, enabled)),
             icon: const Icon(
               Icons.expand_more_sharp,
               size: 20,
-            ),
+            ).marginOnly(right: 15),
             onChanged: enabled
                 ? (String? newValue) {
                     if (newValue != null && newValue != ref.value) {
@@ -1529,11 +1935,11 @@ class _ComboBox extends StatelessWidget {
                   value,
                   style: const TextStyle(fontSize: _kContentFontSize),
                   overflow: TextOverflow.ellipsis,
-                ).marginOnly(left: 5),
+                ).marginOnly(left: 15),
               );
             }).toList(),
           )),
-    );
+    ).marginOnly(bottom: 5);
   }
 }
 
@@ -1556,9 +1962,10 @@ void changeSocks5Proxy() async {
   var proxyController = TextEditingController(text: proxy);
   var userController = TextEditingController(text: username);
   var pwdController = TextEditingController(text: password);
+  RxBool obscure = true.obs;
 
   var isInProgress = false;
-  gFFI.dialogManager.show((setState, close) {
+  gFFI.dialogManager.show((setState, close, context) {
     submit() async {
       setState(() {
         proxyMsg = '';
@@ -1595,78 +2002,64 @@ void changeSocks5Proxy() async {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const SizedBox(
-              height: 8.0,
-            ),
             Row(
               children: [
                 ConstrainedBox(
-                    constraints: const BoxConstraints(minWidth: 100),
-                    child: Text('${translate("Hostname")}:')
-                        .marginOnly(bottom: 16.0)),
-                const SizedBox(
-                  width: 24.0,
-                ),
+                    constraints: const BoxConstraints(minWidth: 140),
+                    child: Text(
+                      '${translate("Hostname")}:',
+                      textAlign: TextAlign.right,
+                    ).marginOnly(right: 10)),
                 Expanded(
                   child: TextField(
                     decoration: InputDecoration(
-                        border: const OutlineInputBorder(),
                         errorText: proxyMsg.isNotEmpty ? proxyMsg : null),
                     controller: proxyController,
-                    focusNode: FocusNode()..requestFocus(),
+                    autofocus: true,
                   ),
                 ),
               ],
-            ),
-            const SizedBox(
-              height: 8.0,
-            ),
+            ).marginOnly(bottom: 8),
             Row(
               children: [
                 ConstrainedBox(
-                    constraints: const BoxConstraints(minWidth: 100),
-                    child: Text('${translate("Username")}:')
-                        .marginOnly(bottom: 16.0)),
-                const SizedBox(
-                  width: 24.0,
-                ),
+                    constraints: const BoxConstraints(minWidth: 140),
+                    child: Text(
+                      '${translate("Username")}:',
+                      textAlign: TextAlign.right,
+                    ).marginOnly(right: 10)),
                 Expanded(
                   child: TextField(
-                    decoration: const InputDecoration(
-                      border: OutlineInputBorder(),
-                    ),
                     controller: userController,
                   ),
                 ),
               ],
-            ),
-            const SizedBox(
-              height: 8.0,
-            ),
+            ).marginOnly(bottom: 8),
             Row(
               children: [
                 ConstrainedBox(
-                    constraints: const BoxConstraints(minWidth: 100),
-                    child: Text('${translate("Password")}:')
-                        .marginOnly(bottom: 16.0)),
-                const SizedBox(
-                  width: 24.0,
-                ),
+                    constraints: const BoxConstraints(minWidth: 140),
+                    child: Text(
+                      '${translate("Password")}:',
+                      textAlign: TextAlign.right,
+                    ).marginOnly(right: 10)),
                 Expanded(
-                  child: TextField(
-                    decoration: const InputDecoration(
-                      border: OutlineInputBorder(),
-                    ),
-                    controller: pwdController,
-                  ),
+                  child: Obx(() => TextField(
+                        obscureText: obscure.value,
+                        decoration: InputDecoration(
+                            suffixIcon: IconButton(
+                                onPressed: () => obscure.value = !obscure.value,
+                                icon: Icon(obscure.value
+                                    ? Icons.visibility_off
+                                    : Icons.visibility))),
+                        controller: pwdController,
+                      )),
                 ),
               ],
             ),
-            const SizedBox(
-              height: 8.0,
-            ),
             Offstage(
-                offstage: !isInProgress, child: const LinearProgressIndicator())
+                offstage: !isInProgress,
+                child: const LinearProgressIndicator().marginOnly(top: 8))
           ],
         ),
       ),

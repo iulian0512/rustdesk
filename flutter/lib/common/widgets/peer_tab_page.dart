@@ -1,115 +1,18 @@
-import 'dart:ui' as ui;
-
-import 'package:bot_toast/bot_toast.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hbb/common/widgets/address_book.dart';
 import 'package:flutter_hbb/common/widgets/my_group.dart';
 import 'package:flutter_hbb/common/widgets/peers_view.dart';
 import 'package:flutter_hbb/common/widgets/peer_card.dart';
+import 'package:flutter_hbb/common/widgets/animated_rotation_widget.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/desktop/widgets/popup_menu.dart';
-import 'package:flutter_hbb/desktop/widgets/tabbar_widget.dart';
-import 'package:flutter_hbb/desktop/widgets/material_mod_popup_menu.dart'
-    as mod_menu;
+
+import 'package:flutter_hbb/models/peer_tab_model.dart';
 import 'package:get/get.dart';
+import 'package:provider/provider.dart';
 
 import '../../common.dart';
 import '../../models/platform_model.dart';
-
-const int groupTabIndex = 4;
-const String defaultGroupTabname = 'Group';
-
-class StatePeerTab {
-  final RxInt currentTab = 0.obs;
-  final RxInt tabHiddenFlag = 0.obs;
-  final RxList<String> tabNames = [
-    'Recent Sessions',
-    'Favorites',
-    'Discovered',
-    'Address Book',
-    defaultGroupTabname,
-  ].obs;
-
-  StatePeerTab._() {
-    tabHiddenFlag.value = (int.tryParse(
-            bind.getLocalFlutterConfig(k: 'hidden-peer-card'),
-            radix: 2) ??
-        0);
-    var tabs = _notHiddenTabs();
-    currentTab.value =
-        int.tryParse(bind.getLocalFlutterConfig(k: 'peer-tab-index')) ?? 0;
-    if (!tabs.contains(currentTab.value)) {
-      currentTab.value = 0;
-    }
-  }
-  static final StatePeerTab instance = StatePeerTab._();
-
-  check() {
-    var tabs = _notHiddenTabs();
-    if (filterGroupCard()) {
-      if (currentTab.value == groupTabIndex) {
-        currentTab.value =
-            tabs.firstWhereOrNull((e) => e != groupTabIndex) ?? 0;
-        bind.setLocalFlutterConfig(
-            k: 'peer-tab-index', v: currentTab.value.toString());
-      }
-    } else {
-      if (gFFI.userModel.isAdmin.isFalse &&
-          gFFI.userModel.groupName.isNotEmpty) {
-        tabNames[groupTabIndex] = gFFI.userModel.groupName.value;
-      } else {
-        tabNames[groupTabIndex] = defaultGroupTabname;
-      }
-      if (tabs.contains(groupTabIndex) &&
-          int.tryParse(bind.getLocalFlutterConfig(k: 'peer-tab-index')) ==
-              groupTabIndex) {
-        currentTab.value = groupTabIndex;
-      }
-    }
-  }
-
-  List<int> currentTabs() {
-    var v = List<int>.empty(growable: true);
-    for (int i = 0; i < tabNames.length; i++) {
-      if (!_isTabHidden(i) && !_isTabFilter(i)) {
-        v.add(i);
-      }
-    }
-    return v;
-  }
-
-  bool filterGroupCard() {
-    if (gFFI.groupModel.users.isEmpty ||
-        (gFFI.userModel.isAdmin.isFalse && gFFI.userModel.groupName.isEmpty)) {
-      return true;
-    } else {
-      return false;
-    }
-  }
-
-  bool _isTabHidden(int tabindex) {
-    return tabHiddenFlag & (1 << tabindex) != 0;
-  }
-
-  bool _isTabFilter(int tabIndex) {
-    if (tabIndex == groupTabIndex) {
-      return filterGroupCard();
-    }
-    return false;
-  }
-
-  List<int> _notHiddenTabs() {
-    var v = List<int>.empty(growable: true);
-    for (int i = 0; i < tabNames.length; i++) {
-      if (!_isTabHidden(i)) {
-        v.add(i);
-      }
-    }
-    return v;
-  }
-}
-
-final statePeerTab = StatePeerTab.instance;
 
 class PeerTabPage extends StatefulWidget {
   const PeerTabPage({Key? key}) : super(key: key);
@@ -119,7 +22,7 @@ class PeerTabPage extends StatefulWidget {
 
 class _TabEntry {
   final Widget widget;
-  final Function() load;
+  final Function({dynamic hint}) load;
   _TabEntry(this.widget, this.load);
 }
 
@@ -149,37 +52,33 @@ class _PeerTabPageState extends State<PeerTabPage>
         AddressBook(
           menuPadding: _menuPadding(),
         ),
-        () => {}),
+        ({dynamic hint}) => gFFI.abModel.pullAb(force: hint == null)),
     _TabEntry(
-        MyGroup(
-          menuPadding: _menuPadding(),
-        ),
-        () => {}),
+      MyGroup(
+        menuPadding: _menuPadding(),
+      ),
+      ({dynamic hint}) => gFFI.groupModel.pull(force: hint == null),
+    ),
   ];
 
   @override
   void initState() {
-    adjustTab();
-
     final uiType = bind.getLocalFlutterConfig(k: 'peer-card-ui-type');
     if (uiType != '') {
       peerCardUiType.value = int.parse(uiType) == PeerUiType.list.index
           ? PeerUiType.list
           : PeerUiType.grid;
     }
+    hideAbTagsPanel.value =
+        bind.mainGetLocalOption(key: "hideAbTagsPanel").isNotEmpty;
     super.initState();
   }
 
   Future<void> handleTabSelection(int tabIndex) async {
     if (tabIndex < entries.length) {
-      statePeerTab.currentTab.value = tabIndex;
-      entries[tabIndex].load();
+      gFFI.peerTabModel.setCurrentTab(tabIndex);
+      entries[tabIndex].load(hint: false);
     }
-  }
-
-  @override
-  void dispose() {
-    super.dispose();
   }
 
   @override
@@ -189,23 +88,47 @@ class _PeerTabPageState extends State<PeerTabPage>
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         SizedBox(
-          height: 28,
+          height: 32,
           child: Container(
-              padding: isDesktop ? null : EdgeInsets.symmetric(horizontal: 2),
-              constraints: isDesktop ? null : kMobilePageConstraints,
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.center,
-                children: [
-                  Expanded(
-                      child: visibleContextMenuListener(
-                          _createSwitchBar(context))),
-                  const PeerSearchBar(),
-                  Offstage(
-                      offstage: !isDesktop,
-                      child: _createPeerViewTypeSwitch(context)
-                          .marginOnly(left: 13)),
-                ],
-              )),
+            padding: isDesktop ? null : EdgeInsets.symmetric(horizontal: 2),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                Expanded(child: _createSwitchBar(context)),
+                const PeerSearchBar().marginOnly(right: isMobile ? 0 : 13),
+                _createRefresh(),
+                Offstage(
+                    offstage: !isDesktop,
+                    child: _createPeerViewTypeSwitch(context)),
+                Offstage(
+                  offstage: gFFI.peerTabModel.currentTab == 0,
+                  child: PeerSortDropdown().marginOnly(left: 8),
+                ),
+                Offstage(
+                  offstage: gFFI.peerTabModel.currentTab != 3,
+                  child: InkWell(
+                    child: Obx(() => Container(
+                        padding: EdgeInsets.all(4.0),
+                        decoration: hideAbTagsPanel.value
+                            ? null
+                            : BoxDecoration(
+                                color: Theme.of(context).colorScheme.background,
+                                borderRadius: BorderRadius.circular(6)),
+                        child: Icon(
+                          Icons.tag_rounded,
+                          size: 18,
+                        ))),
+                    onTap: () async {
+                      await bind.mainSetLocalOption(
+                          key: "hideAbTagsPanel",
+                          value: hideAbTagsPanel.value ? "" : "Y");
+                      hideAbTagsPanel.value = !hideAbTagsPanel.value;
+                    },
+                  ).marginOnly(left: 8),
+                ),
+              ],
+            ),
+          ),
         ),
         _createPeersView(),
       ],
@@ -213,178 +136,120 @@ class _PeerTabPageState extends State<PeerTabPage>
   }
 
   Widget _createSwitchBar(BuildContext context) {
-    final textColor = Theme.of(context).textTheme.titleLarge?.color;
-    return Obx(() {
-      var tabs = statePeerTab.currentTabs();
-      return ListView(
-          scrollDirection: Axis.horizontal,
-          physics: NeverScrollableScrollPhysics(),
-          controller: ScrollController(),
-          children: tabs.map((t) {
-            return InkWell(
-              child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8),
-                  decoration: BoxDecoration(
-                    color: statePeerTab.currentTab.value == t
-                        ? Theme.of(context).backgroundColor
-                        : null,
-                    borderRadius: BorderRadius.circular(isDesktop ? 2 : 6),
-                  ),
-                  child: Align(
-                    alignment: Alignment.center,
-                    child: Text(
-                      translatedTabname(t),
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                          height: 1,
-                          fontSize: 14,
-                          color: statePeerTab.currentTab.value == t
-                              ? textColor
-                              : textColor
-                            ?..withOpacity(0.5)),
-                    ),
-                  )),
-              onTap: () async {
-                await handleTabSelection(t);
-                await bind.setLocalFlutterConfig(
-                    k: 'peer-tab-index', v: t.toString());
-              },
-            );
-          }).toList());
-    });
-  }
+    final model = Provider.of<PeerTabModel>(context);
 
-  translatedTabname(int index) {
-    if (index < statePeerTab.tabNames.length) {
-      final name = statePeerTab.tabNames[index];
-      if (index == groupTabIndex) {
-        if (name == defaultGroupTabname) {
-          return translate(name);
-        } else {
-          return name;
-        }
-      } else {
-        return translate(name);
-      }
-    }
-    assert(false);
-    return index.toString();
+    return ListView(
+        scrollDirection: Axis.horizontal,
+        physics: NeverScrollableScrollPhysics(),
+        children: model.indexs.map((t) {
+          final selected = model.currentTab == t;
+          final color = selected
+              ? MyTheme.tabbar(context).selectedTextColor
+              : MyTheme.tabbar(context).unSelectedTextColor
+            ?..withOpacity(0.5);
+          final hover = false.obs;
+          final deco = BoxDecoration(
+              color: Theme.of(context).colorScheme.background,
+              borderRadius: BorderRadius.circular(6));
+          final decoBorder = BoxDecoration(
+              border: Border(
+            bottom: BorderSide(width: 2, color: color!),
+          ));
+          return Obx(() => InkWell(
+                child: Container(
+                  decoration:
+                      selected ? decoBorder : (hover.value ? deco : null),
+                  child: Tooltip(
+                    message:
+                        model.tabTooltip(t, gFFI.groupModel.groupName.value),
+                    child: Icon(model.tabIcon(t), color: color),
+                  ).paddingSymmetric(horizontal: 4),
+                ).paddingSymmetric(horizontal: 4),
+                onTap: () async {
+                  await handleTabSelection(t);
+                  await bind.setLocalFlutterConfig(
+                      k: 'peer-tab-index', v: t.toString());
+                },
+                onHover: (value) => hover.value = value,
+              ));
+        }).toList());
   }
 
   Widget _createPeersView() {
-    final verticalMargin = isDesktop ? 12.0 : 6.0;
-    return Expanded(
-        child: Obx(() {
-      var tabs = statePeerTab.currentTabs();
-      if (tabs.isEmpty) {
-        return visibleContextMenuListener(Center(
-          child: Text(translate('Right click to select tabs')),
-        ));
+    final model = Provider.of<PeerTabModel>(context);
+    Widget child;
+    if (model.indexs.isEmpty) {
+      child = Center(
+        child: Text(translate('Right click to select tabs')),
+      );
+    } else {
+      if (model.indexs.contains(model.currentTab)) {
+        child = entries[model.currentTab].widget;
       } else {
-        if (tabs.contains(statePeerTab.currentTab.value)) {
-          return entries[statePeerTab.currentTab.value].widget;
-        } else {
-          statePeerTab.currentTab.value = tabs[0];
-          return entries[statePeerTab.currentTab.value].widget;
-        }
+        Future.delayed(Duration.zero, () {
+          model.setCurrentTab(model.indexs[0]);
+        });
+        child = entries[0].widget;
       }
-    }).marginSymmetric(vertical: verticalMargin));
+    }
+    return Expanded(
+        child: child.marginSymmetric(vertical: isDesktop ? 12.0 : 6.0));
+  }
+
+  Widget _createRefresh() {
+    final textColor = Theme.of(context).textTheme.titleLarge?.color;
+    return Offstage(
+      offstage: gFFI.peerTabModel.currentTab < 3, // local tab can't see effect
+      child: Container(
+        padding: EdgeInsets.all(4.0),
+        child: AnimatedRotationWidget(
+            onPressed: () {
+              if (gFFI.peerTabModel.currentTab < entries.length) {
+                entries[gFFI.peerTabModel.currentTab].load();
+              }
+            },
+            child: RotatedBox(
+                quarterTurns: 2,
+                child: Icon(
+                  Icons.refresh,
+                  size: 18,
+                  color: textColor,
+                ))),
+      ),
+    );
   }
 
   Widget _createPeerViewTypeSwitch(BuildContext context) {
     final textColor = Theme.of(context).textTheme.titleLarge?.color;
-    final activeDeco = BoxDecoration(color: Theme.of(context).backgroundColor);
-    return Row(
-      children: [PeerUiType.grid, PeerUiType.list]
-          .map((type) => Obx(
-                () => Container(
-                  padding: EdgeInsets.all(4.0),
-                  decoration: peerCardUiType.value == type ? activeDeco : null,
-                  child: InkWell(
-                      onTap: () async {
-                        await bind.setLocalFlutterConfig(
-                            k: 'peer-card-ui-type', v: type.index.toString());
-                        peerCardUiType.value = type;
-                      },
-                      child: Icon(
-                        type == PeerUiType.grid
-                            ? Icons.grid_view_rounded
-                            : Icons.list,
-                        size: 18,
-                        color:
-                            peerCardUiType.value == type ? textColor : textColor
-                              ?..withOpacity(0.5),
-                      )),
-                ),
-              ))
-          .toList(),
+    final types = [PeerUiType.grid, PeerUiType.list];
+    final hover = false.obs;
+    final deco = BoxDecoration(
+      color: Theme.of(context).colorScheme.background,
+      borderRadius: BorderRadius.circular(5),
     );
-  }
 
-  adjustTab() {
-    var tabs = statePeerTab.currentTabs();
-    if (tabs.isNotEmpty && !tabs.contains(statePeerTab.currentTab.value)) {
-      statePeerTab.currentTab.value = tabs[0];
-    }
-  }
-
-  Widget visibleContextMenuListener(Widget child) {
-    return Listener(
-        onPointerDown: (e) {
-          if (e.kind != ui.PointerDeviceKind.mouse) {
-            return;
-          }
-          if (e.buttons == 2) {
-            showRightMenu(
-              (CancelFunc cancelFunc) {
-                return visibleContextMenu(cancelFunc);
-              },
-              target: e.position,
-            );
-          }
-        },
-        child: child);
-  }
-
-  Widget visibleContextMenu(CancelFunc cancelFunc) {
-    return Obx(() {
-      final List<MenuEntryBase> menu = List.empty(growable: true);
-      for (int i = 0; i < statePeerTab.tabNames.length; i++) {
-        if (i == groupTabIndex && statePeerTab.filterGroupCard()) {
-          continue;
-        }
-        int bitMask = 1 << i;
-        menu.add(MenuEntrySwitch(
-            switchType: SwitchType.scheckbox,
-            text: translatedTabname(i),
-            getter: () async {
-              return statePeerTab.tabHiddenFlag & bitMask == 0;
-            },
-            setter: (show) async {
-              if (show) {
-                statePeerTab.tabHiddenFlag.value &= ~bitMask;
-              } else {
-                statePeerTab.tabHiddenFlag.value |= bitMask;
-              }
+    return Obx(
+      () => Container(
+        padding: EdgeInsets.all(4.0),
+        decoration: hover.value ? deco : null,
+        child: InkWell(
+            onHover: (value) => hover.value = value,
+            onTap: () async {
+              final type = types.elementAt(
+                  peerCardUiType.value == types.elementAt(0) ? 1 : 0);
               await bind.setLocalFlutterConfig(
-                  k: 'hidden-peer-card',
-                  v: statePeerTab.tabHiddenFlag.value.toRadixString(2));
-              cancelFunc();
-              adjustTab();
-            }));
-      }
-      return mod_menu.PopupMenu(
-          items: menu
-              .map((entry) => entry.build(
-                  context,
-                  const MenuConfig(
-                    commonColor: MyTheme.accent,
-                    height: 20.0,
-                    dividerHeight: 12.0,
-                  )))
-              .expand((i) => i)
-              .toList());
-    });
+                  k: 'peer-card-ui-type', v: type.index.toString());
+              peerCardUiType.value = type;
+            },
+            child: Icon(
+              peerCardUiType.value == PeerUiType.grid
+                  ? Icons.view_list_rounded
+                  : Icons.grid_view_rounded,
+              size: 18,
+              color: textColor,
+            )),
+      ),
+    );
   }
 }
 
@@ -421,12 +286,14 @@ class _PeerSearchBarState extends State<PeerSearchBar> {
     FocusNode focusNode = FocusNode();
     focusNode.addListener(() {
       focused.value = focusNode.hasFocus;
-      peerSearchTextController.selection = TextSelection(baseOffset: 0, extentOffset: peerSearchTextController.value.text.length);
+      peerSearchTextController.selection = TextSelection(
+          baseOffset: 0,
+          extentOffset: peerSearchTextController.value.text.length);
     });
     return Container(
       width: 120,
       decoration: BoxDecoration(
-        color: Theme.of(context).backgroundColor,
+        color: Theme.of(context).colorScheme.background,
         borderRadius: BorderRadius.circular(6),
       ),
       child: Obx(() => Row(
@@ -488,6 +355,79 @@ class _PeerSearchBarState extends State<PeerSearchBar> {
               )
             ],
           )),
+    );
+  }
+}
+
+class PeerSortDropdown extends StatefulWidget {
+  const PeerSortDropdown({super.key});
+
+  @override
+  State<PeerSortDropdown> createState() => _PeerSortDropdownState();
+}
+
+class _PeerSortDropdownState extends State<PeerSortDropdown> {
+  @override
+  void initState() {
+    if (!PeerSortType.values.contains(peerSort.value)) {
+      peerSort.value = PeerSortType.remoteId;
+      bind.setLocalFlutterConfig(
+        k: "peer-sorting",
+        v: peerSort.value,
+      );
+    }
+    super.initState();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final style = TextStyle(
+        color: Theme.of(context).textTheme.titleLarge?.color,
+        fontSize: MenuConfig.fontSize,
+        fontWeight: FontWeight.normal);
+    List<PopupMenuEntry> items = List.empty(growable: true);
+    items.add(PopupMenuItem(
+        height: 36,
+        enabled: false,
+        child: Text(translate("Sort by"), style: style)));
+    for (var e in PeerSortType.values) {
+      items.add(PopupMenuItem(
+          height: 36,
+          child: Obx(() => Center(
+                child: SizedBox(
+                  height: 36,
+                  child: getRadio(
+                      Text(translate(e), style: style), e, peerSort.value,
+                      dense: true, (String? v) async {
+                    if (v != null) {
+                      peerSort.value = v;
+                      await bind.setLocalFlutterConfig(
+                        k: "peer-sorting",
+                        v: peerSort.value,
+                      );
+                    }
+                  }),
+                ),
+              ))));
+    }
+
+    var menuPos = RelativeRect.fromLTRB(0, 0, 0, 0);
+    return InkWell(
+      child: Icon(
+        Icons.sort_rounded,
+        size: 18,
+      ),
+      onTapDown: (details) {
+        final x = details.globalPosition.dx;
+        final y = details.globalPosition.dy;
+        menuPos = RelativeRect.fromLTRB(x, y, x, y);
+      },
+      onTap: () => showMenu(
+        context: context,
+        position: menuPos,
+        items: items,
+        elevation: 8,
+      ),
     );
   }
 }

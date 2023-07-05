@@ -31,7 +31,7 @@ class _FileManagerTabPageState extends State<FileManagerTabPage> {
 
   _FileManagerTabPageState(Map<String, dynamic> params) {
     Get.put(DesktopTabController(tabType: DesktopTabType.fileTransfer));
-    tabController.onSelected = (_, id) {
+    tabController.onSelected = (id) {
       WindowController.fromWindowId(windowId())
           .setTitle(getWindowNameWithId(id));
     };
@@ -40,8 +40,13 @@ class _FileManagerTabPageState extends State<FileManagerTabPage> {
         label: params['id'],
         selectedIcon: selectedIcon,
         unselectedIcon: unselectedIcon,
-        onTabCloseButton: () => () => tabController.closeBy(params['id']),
-        page: FileManagerPage(key: ValueKey(params['id']), id: params['id'])));
+        onTabCloseButton: () => tabController.closeBy(params['id']),
+        page: FileManagerPage(
+          key: ValueKey(params['id']),
+          id: params['id'],
+          tabController: tabController,
+          forceRelay: params['forceRelay'],
+        )));
   }
 
   @override
@@ -64,7 +69,12 @@ class _FileManagerTabPageState extends State<FileManagerTabPage> {
             selectedIcon: selectedIcon,
             unselectedIcon: unselectedIcon,
             onTabCloseButton: () => tabController.closeBy(id),
-            page: FileManagerPage(key: ValueKey(id), id: id)));
+            page: FileManagerPage(
+              key: ValueKey(id),
+              id: id,
+              tabController: tabController,
+              forceRelay: args['forceRelay'],
+            )));
       } else if (call.method == "onDestroy") {
         tabController.clear();
       } else if (call.method == kWindowActionRebuild) {
@@ -82,7 +92,7 @@ class _FileManagerTabPageState extends State<FileManagerTabPage> {
       decoration: BoxDecoration(
           border: Border.all(color: MyTheme.color(context).border!)),
       child: Scaffold(
-          backgroundColor: Theme.of(context).backgroundColor,
+          backgroundColor: Theme.of(context).cardColor,
           body: DesktopTab(
             controller: tabController,
             onWindowCloseButton: handleWindowCloseButton,
@@ -90,7 +100,7 @@ class _FileManagerTabPageState extends State<FileManagerTabPage> {
             labelGetter: DesktopTab.labelGetterAlias,
           )),
     );
-    return Platform.isMacOS
+    return Platform.isMacOS || kUseCompatibleUiMode
         ? tabWidget
         : SubWindowDragToResizeArea(
             child: tabWidget,

@@ -40,12 +40,22 @@ pub use tokio_socks::TargetAddr;
 pub mod password_security;
 pub use chrono;
 pub use directories_next;
+pub use libc;
 pub mod keyboard;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub use dlopen;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub use machine_uid;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub use sysinfo;
+pub use toml;
+pub use uuid;
 
 #[cfg(feature = "quic")]
 pub type Stream = quic::Connection;
 #[cfg(not(feature = "quic"))]
 pub type Stream = tcp::FramedStream;
+pub type SessionID = uuid::Uuid;
 
 #[inline]
 pub async fn sleep(sec: f32) {
@@ -197,9 +207,6 @@ pub fn get_version_from_url(url: &str) -> String {
 }
 
 pub fn gen_version() {
-    if Ok("release".to_owned()) != std::env::var("PROFILE") {
-        return;
-    }
     println!("cargo:rerun-if-changed=Cargo.toml");
     use std::io::prelude::*;
     let mut file = File::create("./src/version.rs").unwrap();
@@ -214,11 +221,7 @@ pub fn gen_version() {
     // generate build date
     let build_date = format!("{}", chrono::Local::now().format("%Y-%m-%d %H:%M"));
     file.write_all(
-        format!(
-            "#[allow(dead_code)]\npub const BUILD_DATE: &str = \"{}\";",
-            build_date
-        )
-        .as_bytes(),
+        format!("#[allow(dead_code)]\npub const BUILD_DATE: &str = \"{build_date}\";\n").as_bytes(),
     )
     .ok();
     file.sync_all().ok();
@@ -288,7 +291,7 @@ pub fn get_time() -> i64 {
 
 #[inline]
 pub fn is_ipv4_str(id: &str) -> bool {
-    regex::Regex::new(r"^\d+\.\d+\.\d+\.\d+(:\d+)?$")
+    regex::Regex::new(r"^(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)(:\d+)?$")
         .unwrap()
         .is_match(id)
 }
@@ -315,6 +318,44 @@ pub fn is_domain_port_str(id: &str) -> bool {
     )
     .unwrap()
     .is_match(id)
+}
+
+pub fn init_log(_is_async: bool, _name: &str) -> Option<flexi_logger::LoggerHandle> {
+    #[cfg(debug_assertions)]
+    {
+        use env_logger::*;
+        init_from_env(Env::default().filter_or(DEFAULT_FILTER_ENV, "info"));
+        None
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        // https://docs.rs/flexi_logger/latest/flexi_logger/error_info/index.html#write
+        // though async logger more efficient, but it also causes more problems, disable it for now
+        let mut logger_holder: Option<flexi_logger::LoggerHandle> = None;
+        let mut path = config::Config::log_path();
+        if !_name.is_empty() {
+            path.push(_name);
+        }
+        use flexi_logger::*;
+        if let Ok(x) = Logger::try_with_env_or_str("debug") {
+            logger_holder = x
+                .log_to_file(FileSpec::default().directory(path))
+                .write_mode(if _is_async {
+                    WriteMode::Async
+                } else {
+                    WriteMode::Direct
+                })
+                .format(opt_format)
+                .rotate(
+                    Criterion::Age(Age::Day),
+                    Naming::Timestamps,
+                    Cleanup::KeepLogFiles(6),
+                )
+                .start()
+                .ok();
+        }
+        logger_holder
+    }
 }
 
 #[cfg(test)]
@@ -345,39 +386,55 @@ mod test {
 
     #[test]
     fn test_ipv6() {
-        assert_eq!(is_ipv6_str("1:2:3"), true);
-        assert_eq!(is_ipv6_str("[ab:2:3]:12"), true);
-        assert_eq!(is_ipv6_str("[ABEF:2a:3]:12"), true);
-        assert_eq!(is_ipv6_str("[ABEG:2a:3]:12"), false);
-        assert_eq!(is_ipv6_str("1[ab:2:3]:12"), false);
-        assert_eq!(is_ipv6_str("1.1.1.1"), false);
-        assert_eq!(is_ip_str("1.1.1.1"), true);
-        assert_eq!(is_ipv6_str("1:2:"), false);
-        assert_eq!(is_ipv6_str("1:2::0"), true);
-        assert_eq!(is_ipv6_str("[1:2::0]:1"), true);
-        assert_eq!(is_ipv6_str("[1:2::0]:"), false);
-        assert_eq!(is_ipv6_str("1:2::0]:1"), false);
+        assert!(is_ipv6_str("1:2:3"));
+        assert!(is_ipv6_str("[ab:2:3]:12"));
+        assert!(is_ipv6_str("[ABEF:2a:3]:12"));
+        assert!(!is_ipv6_str("[ABEG:2a:3]:12"));
+        assert!(!is_ipv6_str("1[ab:2:3]:12"));
+        assert!(!is_ipv6_str("1.1.1.1"));
+        assert!(is_ip_str("1.1.1.1"));
+        assert!(!is_ipv6_str("1:2:"));
+        assert!(is_ipv6_str("1:2::0"));
+        assert!(is_ipv6_str("[1:2::0]:1"));
+        assert!(!is_ipv6_str("[1:2::0]:"));
+        assert!(!is_ipv6_str("1:2::0]:1"));
+    }
+
+    #[test]
+    fn test_ipv4() {
+        assert!(is_ipv4_str("1.2.3.4"));
+        assert!(is_ipv4_str("1.2.3.4:90"));
+        assert!(is_ipv4_str("192.168.0.1"));
+        assert!(is_ipv4_str("0.0.0.0"));
+        assert!(is_ipv4_str("255.255.255.255"));
+        assert!(!is_ipv4_str("256.0.0.0"));
+        assert!(!is_ipv4_str("256.256.256.256"));
+        assert!(!is_ipv4_str("1:2:"));
+        assert!(!is_ipv4_str("192.168.0.256"));
+        assert!(!is_ipv4_str("192.168.0.1/24"));
+        assert!(!is_ipv4_str("192.168.0."));
+        assert!(!is_ipv4_str("192.168..1"));
     }
 
     #[test]
     fn test_hostname_port() {
-        assert_eq!(is_domain_port_str("a:12"), false);
-        assert_eq!(is_domain_port_str("a.b.c:12"), false);
-        assert_eq!(is_domain_port_str("test.com:12"), true);
-        assert_eq!(is_domain_port_str("test-UPPER.com:12"), true);
-        assert_eq!(is_domain_port_str("some-other.domain.com:12"), true);
-        assert_eq!(is_domain_port_str("under_score:12"), false);
-        assert_eq!(is_domain_port_str("a@bc:12"), false);
-        assert_eq!(is_domain_port_str("1.1.1.1:12"), false);
-        assert_eq!(is_domain_port_str("1.2.3:12"), false);
-        assert_eq!(is_domain_port_str("1.2.3.45:12"), false);
-        assert_eq!(is_domain_port_str("a.b.c:123456"), false);
-        assert_eq!(is_domain_port_str("---:12"), false);
-        assert_eq!(is_domain_port_str(".:12"), false);
+        assert!(!is_domain_port_str("a:12"));
+        assert!(!is_domain_port_str("a.b.c:12"));
+        assert!(is_domain_port_str("test.com:12"));
+        assert!(is_domain_port_str("test-UPPER.com:12"));
+        assert!(is_domain_port_str("some-other.domain.com:12"));
+        assert!(!is_domain_port_str("under_score:12"));
+        assert!(!is_domain_port_str("a@bc:12"));
+        assert!(!is_domain_port_str("1.1.1.1:12"));
+        assert!(!is_domain_port_str("1.2.3:12"));
+        assert!(!is_domain_port_str("1.2.3.45:12"));
+        assert!(!is_domain_port_str("a.b.c:123456"));
+        assert!(!is_domain_port_str("---:12"));
+        assert!(!is_domain_port_str(".:12"));
         // todo: should we also check for these edge cases?
         // out-of-range port
-        assert_eq!(is_domain_port_str("test.com:0"), true);
-        assert_eq!(is_domain_port_str("test.com:98989"), true);
+        assert!(is_domain_port_str("test.com:0"));
+        assert!(is_domain_port_str("test.com:98989"));
     }
 
     #[test]

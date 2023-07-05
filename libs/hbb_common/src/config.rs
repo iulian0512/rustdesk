@@ -2,9 +2,10 @@ use std::{
     collections::HashMap,
     fs,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    ops::{Deref, DerefMut},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, RwLock},
-    time::SystemTime,
+    time::{Duration, Instant, SystemTime},
 };
 
 use anyhow::Result;
@@ -25,18 +26,12 @@ use crate::{
 
 pub const RENDEZVOUS_TIMEOUT: u64 = 12_000;
 pub const CONNECT_TIMEOUT: u64 = 18_000;
-pub const READ_TIMEOUT: u64 = 30_000;
+pub const READ_TIMEOUT: u64 = 18_000;
 pub const REG_INTERVAL: i64 = 12_000;
 pub const COMPRESS_LEVEL: i32 = 3;
 const SERIAL: i32 = 3;
 const PASSWORD_ENC_VERSION: &str = "00";
-// 128x128
-#[cfg(target_os = "macos")] // 128x128 on 160x160 canvas, then shrink to 128, mac looks better with padding
-pub const ICON: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAIAAAACACAMAAAD04JH5AAAAyVBMVEUAAAAAcf8Acf8Acf8Acv8Acf8Acf8Acf8Acf8AcP8Acf8Ab/8AcP8Acf////8AaP/z+f/o8v/k7v/5/v/T5f8AYP/u9v/X6f+hx/+Kuv95pP8Aef/B1/+TwP9xoP8BdP/g6P+Irv9ZmP8Bgf/E3f98q/9sn/+01f+Es/9nm/9Jif8hhv8off/M4P+syP+avP86iP/c7f+xy/9yqf9Om/9hk/9Rjv+60P99tv9fpf88lv8yjf8Tgf8deP+kvP8BiP8NeP8hkP80gP8oj2VLAAAADXRSTlMA7o7qLvnaxZ1FOxYPjH9HWgAABHJJREFUeNrtm+tW4jAQgBfwuu7MtIUWsOUiCCioIIgLiqvr+z/UHq/LJKVkmwTcc/r9E2nzlU4mSTP9lpGRkZGR8VX5cZjfL+yCEXYL+/nDH//U/Pd8DgyTy39Xbv7oIAcWyB0cqbW/sweW2NtRaj8H1sgpGOwUIAH7Bkd7YJW9dXFwAJY5WNP/cmCZQnJvzIN18on5LwfWySXlxEPYAIcad8D6PdiHDbCfIFCADVBIENiFDbCbIACKPPXrZ+cP8E6/0znvP4EymgIEravIRcTxu8HxNSJ60a8W0AYECKrlAN+YwAthCd9wm1Ug6wKzIn5SgRduXfwkqDasCjx0XFzi9PV6zwNcIuhcWBOg+ikySq8C9UD4dEKWBCoOcspvAuLHTo9sCDQiFPHotRM48j8G5gVur1FdAN2uaYEuiz7xFsgEJ2RUoMUakXuBTHHoGxQYOBhHjeUBAefEnMAowFhaLBOKuOemBBbxLRQrH2PBCgMvNCPQGMeevTb9zLrPxz2Mo+QbEaijzPUcOOHMQZkKGRAIPem39+bypREMPTkQW/oCfk866zAkiIFG4yIKRE/aAnfiSd0WrORY6pFdXQEqi9mvAQm0RIOSnoCcZ8vJoz3diCnjRk+g8VP4/fuQDJ2Lxr6WwG0gXs9aTpDzW0vgDBlVUpixR8gYk44AD8FrUKHr8JQJGgIDnoDqoALxmWPQSi9AVVzm8gKUuEPGr/QCvptwJkbSYT/TC4S8C96DGjTj86aHtAI0x2WaBIq0eSYYpRa4EsdWVVwWu9O0Aj6f6dyBMnwEraeOgSYu0wZlauzA47QCbT7DgAQSE+hZWoEBF/BBmWOewNMK3BsSqKUW4MGcWqCSVmDkbvkXGKQOwg6PAUO9oL3xXhA20yaiCjuwYygRVQlUOTWTCf2SuNJTxeFjgaHByGuAIvd8ItdPLTDhS7IuqEE1YSKVOgbayLhSFQhMzYh8hwfBs1r7c505YVIQYEdNoKwxK06MJiyrpUFHiF0NAfCQUVHoiRclIXJIR6C2fqG37pBHvcWpgwzvAtYwkR5UGV2e42UISdBJETl3mg8ouo54Rcnti1/vaT+iuUQBt500Cgo4U10BeHSkk57FB0JjWkKRMWgLUA0lLodtImAQdaMiiri3+gIAPZQoutHNsgKF1aaDMhMyIdBf8Th+Bh8MTjGWCpl5Wv43tDmnF+IUVMrcZgRoiAxhtrloYizNkZaAnF5leglbNhj0wYCAbCDvGb0mP4nib7O7ZlcYQ2m1gPtIZgVgGNNMeaVAaWR+57TrqgtUnm3sHQ+kYeE6fufUubG1ez50FXbPnWgBlgSABmN3TTcsRl2yWkHRrwbiunvk/W2+Mg1hPZplPDeXRbZzStFH15s1QIVd3UImP5z/bHpeeQLvRJ7XLFUffQIlCvqlXETQbgN9/rlYABGosv+Vi9m2Xs639YLGrZd0br+odetlvdsvbN56abfd4vbCzv9Q3v/ygoOV21A4OPpfXvH4Ai+5ZGRkZGRkbJA/t/I0QMzoMiEAAAAASUVORK5CYII=
-";
-#[cfg(not(target_os = "macos"))] // 128x128 no padding
-pub const ICON: &str = "data:image/png;base64,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
-";
+
 #[cfg(target_os = "macos")]
 lazy_static::lazy_static! {
     pub static ref ORG: Arc<RwLock<String>> = Arc::new(RwLock::new("com.carriez".to_owned()));
@@ -49,7 +44,7 @@ lazy_static::lazy_static! {
     static ref CONFIG: Arc<RwLock<Config>> = Arc::new(RwLock::new(Config::load()));
     static ref CONFIG2: Arc<RwLock<Config2>> = Arc::new(RwLock::new(Config2::load()));
     static ref LOCAL_CONFIG: Arc<RwLock<LocalConfig>> = Arc::new(RwLock::new(LocalConfig::load()));
-    pub static ref ONLINE: Arc<Mutex<HashMap<String, i64>>> = Default::default();
+    static ref ONLINE: Arc<Mutex<HashMap<String, i64>>> = Default::default();
     pub static ref PROD_RENDEZVOUS_SERVER: Arc<RwLock<String>> = Arc::new(RwLock::new(match option_env!("RENDEZVOUS_SERVER") {
         Some(key) if !key.is_empty() => key,
         _ => "",
@@ -57,6 +52,7 @@ lazy_static::lazy_static! {
     pub static ref APP_NAME: Arc<RwLock<String>> = Arc::new(RwLock::new("RustDesk".to_owned()));
     static ref KEY_PAIR: Arc<Mutex<Option<KeyPair>>> = Default::default();
     static ref HW_CODEC_CONFIG: Arc<RwLock<HwCodecConfig>> = Arc::new(RwLock::new(HwCodecConfig::load()));
+    static ref USER_DEFAULT_CONFIG: Arc<RwLock<(UserDefaultConfig, Instant)>> = Arc::new(RwLock::new((UserDefaultConfig::load(), Instant::now())));
 }
 
 lazy_static::lazy_static! {
@@ -68,11 +64,15 @@ lazy_static::lazy_static! {
     pub static ref APP_HOME_DIR: Arc<RwLock<String>> = Default::default();
 }
 
-// #[cfg(any(target_os = "android", target_os = "ios"))]
+pub const LINK_DOCS_HOME: &str = "https://rustdesk.com/docs/en/";
+pub const LINK_DOCS_X11_REQUIRED: &str = "https://rustdesk.com/docs/en/manual/linux/#x11-required";
+pub const LINK_HEADLESS_LINUX_SUPPORT: &str =
+    "https://github.com/rustdesk/rustdesk/wiki/Headless-Linux-Support";
 lazy_static::lazy_static! {
     pub static ref HELPER_URL: HashMap<&'static str, &'static str> = HashMap::from([
-        ("rustdesk docs home", "https://rustdesk.com/docs/en/"),
-        ("rustdesk docs x11-required", "https://rustdesk.com/docs/en/manual/linux/#x11-required"),
+        ("rustdesk docs home", LINK_DOCS_HOME),
+        ("rustdesk docs x11-required", LINK_DOCS_X11_REQUIRED),
+        ("rustdesk x11 headless", LINK_HEADLESS_LINUX_SUPPORT),
         ]);
 }
 
@@ -105,12 +105,44 @@ macro_rules! serde_field_string {
         where
             D: de::Deserializer<'de>,
         {
-            let s: &str = de::Deserialize::deserialize(deserializer)?;
-            Ok(if s.is_empty() {
-                Self::$default_func()
-            } else {
-                s.to_owned()
-            })
+            let s: String =
+                de::Deserialize::deserialize(deserializer).unwrap_or(Self::$default_func());
+            if s.is_empty() {
+                return Ok(Self::$default_func());
+            }
+            Ok(s)
+        }
+    };
+}
+
+macro_rules! serde_field_bool {
+    ($struct_name: ident, $field_name: literal, $func: ident, $default: literal) => {
+        #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+        pub struct $struct_name {
+            #[serde(default = $default, rename = $field_name, deserialize_with = "deserialize_bool")]
+            pub v: bool,
+        }
+        impl Default for $struct_name {
+            fn default() -> Self {
+                Self { v: Self::$func() }
+            }
+        }
+        impl $struct_name {
+            pub fn $func() -> bool {
+                UserDefaultConfig::read().get($field_name) == "Y"
+            }
+        }
+        impl Deref for $struct_name {
+            type Target = bool;
+
+            fn deref(&self) -> &Self::Target {
+                &self.v
+            }
+        }
+        impl DerefMut for $struct_name {
+            fn deref_mut(&mut self) -> &mut Self::Target {
+                &mut self.v
+            }
         }
     };
 }
@@ -123,103 +155,135 @@ pub enum NetworkType {
 
 #[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq)]
 pub struct Config {
-    #[serde(default)]
+    #[serde(
+        default,
+        skip_serializing_if = "String::is_empty",
+        deserialize_with = "deserialize_string"
+    )]
     pub id: String, // use
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string")]
     enc_id: String, // store
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string")]
     password: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string")]
     salt: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_keypair")]
     key_pair: KeyPair, // sk, pk
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_bool")]
     key_confirmed: bool,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_hashmap_string_bool")]
     keys_confirmed: HashMap<String, bool>,
 }
 
 #[derive(Debug, Default, PartialEq, Serialize, Deserialize, Clone)]
 pub struct Socks5Server {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string")]
     pub proxy: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string")]
     pub username: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string")]
     pub password: String,
 }
 
 // more variable configs
 #[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq)]
 pub struct Config2 {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string")]
     rendezvous_server: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_i32")]
     nat_type: i32,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_i32")]
     serial: i32,
 
     #[serde(default)]
     socks: Option<Socks5Server>,
 
     // the other scalar value must before this
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_hashmap_string_string")]
     pub options: HashMap<String, String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq)]
+pub struct Resolution {
+    pub w: i32,
+    pub h: i32,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq)]
 pub struct PeerConfig {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_vec_u8")]
     pub password: Vec<u8>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_size")]
     pub size: Size,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_size")]
     pub size_ft: Size,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_size")]
     pub size_pf: Size,
     #[serde(
         default = "PeerConfig::default_view_style",
-        deserialize_with = "PeerConfig::deserialize_view_style"
+        deserialize_with = "PeerConfig::deserialize_view_style",
+        skip_serializing_if = "String::is_empty"
     )]
     pub view_style: String,
     #[serde(
         default = "PeerConfig::default_scroll_style",
-        deserialize_with = "PeerConfig::deserialize_scroll_style"
+        deserialize_with = "PeerConfig::deserialize_scroll_style",
+        skip_serializing_if = "String::is_empty"
     )]
     pub scroll_style: String,
     #[serde(
         default = "PeerConfig::default_image_quality",
-        deserialize_with = "PeerConfig::deserialize_image_quality"
+        deserialize_with = "PeerConfig::deserialize_image_quality",
+        skip_serializing_if = "String::is_empty"
     )]
     pub image_quality: String,
-    #[serde(default)]
+    #[serde(
+        default = "PeerConfig::default_custom_image_quality",
+        deserialize_with = "PeerConfig::deserialize_custom_image_quality",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub custom_image_quality: Vec<i32>,
-    #[serde(default)]
-    pub show_remote_cursor: bool,
-    #[serde(default)]
-    pub lock_after_session_end: bool,
-    #[serde(default)]
-    pub privacy_mode: bool,
-    #[serde(default)]
+    #[serde(flatten)]
+    pub show_remote_cursor: ShowRemoteCursor,
+    #[serde(flatten)]
+    pub lock_after_session_end: LockAfterSessionEnd,
+    #[serde(flatten)]
+    pub privacy_mode: PrivacyMode,
+    #[serde(flatten)]
+    pub allow_swap_key: AllowSwapKey,
+    #[serde(default, deserialize_with = "deserialize_vec_i32_string_i32")]
     pub port_forwards: Vec<(i32, String, i32)>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_i32")]
     pub direct_failures: i32,
-    #[serde(default)]
-    pub disable_audio: bool,
-    #[serde(default)]
-    pub disable_clipboard: bool,
-    #[serde(default)]
-    pub enable_file_transfer: bool,
-    #[serde(default)]
-    pub show_quality_monitor: bool,
-    #[serde(default)]
+    #[serde(flatten)]
+    pub disable_audio: DisableAudio,
+    #[serde(flatten)]
+    pub disable_clipboard: DisableClipboard,
+    #[serde(flatten)]
+    pub enable_file_transfer: EnableFileTransfer,
+    #[serde(flatten)]
+    pub show_quality_monitor: ShowQualityMonitor,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_string",
+        skip_serializing_if = "String::is_empty"
+    )]
     pub keyboard_mode: String,
+    #[serde(flatten)]
+    pub view_only: ViewOnly,
+
+    #[serde(
+        default,
+        deserialize_with = "deserialize_hashmap_resolutions",
+        skip_serializing_if = "HashMap::is_empty"
+    )]
+    pub custom_resolutions: HashMap<String, Resolution>,
 
     // The other scalar value must before this
     #[serde(default, deserialize_with = "PeerConfig::deserialize_options")]
-    pub options: HashMap<String, String>,
+    pub options: HashMap<String, String>, // not use delete to represent default values
     // Various data for flutter ui
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_hashmap_string_string")]
     pub ui_flutter: HashMap<String, String>,
     #[serde(default)]
     pub info: PeerInfoSerde,
@@ -229,22 +293,28 @@ pub struct PeerConfig {
 
 #[derive(Debug, PartialEq, Default, Serialize, Deserialize, Clone)]
 pub struct PeerInfoSerde {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string")]
     pub username: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string")]
     pub hostname: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string")]
     pub platform: String,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq)]
 pub struct TransferSerde {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_vec_string")]
     pub write_jobs: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_vec_string")]
     pub read_jobs: Vec<String>,
 }
 
+#[inline]
+pub fn get_online_state() -> i64 {
+    *ONLINE.lock().unwrap().values().max().unwrap_or(&0)
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn patch(path: PathBuf) -> PathBuf {
     if let Some(_tmp) = path.to_str() {
         #[cfg(windows)]
@@ -265,7 +335,17 @@ fn patch(path: PathBuf) -> PathBuf {
                         .trim()
                         .to_owned();
                     if user != "root" {
-                        return format!("/home/{}", user).into();
+                        let cmd = format!("getent passwd '{}' | awk -F':' '{{print $6}}'", user);
+                        if let Ok(output) = std::process::Command::new(cmd).output() {
+                            let home_dir = String::from_utf8_lossy(&output.stdout)
+                                .to_string()
+                                .trim()
+                                .to_owned();
+                            if !home_dir.is_empty() {
+                                return home_dir.into();
+                            }
+                        }
+                        return format!("/home/{user}").into();
                     }
                 }
             }
@@ -367,11 +447,14 @@ impl Config {
             config.id = id;
             id_valid = true;
             store |= store2;
-        } else if crate::get_modified_time(&Self::file_(""))
-            .checked_sub(std::time::Duration::from_secs(30)) // allow modification during installation
-            .unwrap_or_else(crate::get_exe_time)
-            < crate::get_exe_time()
-            && !config.id.is_empty()
+        } else if
+        // Comment out for forward compatible
+        // crate::get_modified_time(&Self::file_(""))
+        // .checked_sub(std::time::Duration::from_secs(30)) // allow modification during installation
+        // .unwrap_or_else(crate::get_exe_time)
+        // < crate::get_exe_time()
+        // &&
+        !config.id.is_empty()
             && config.enc_id.is_empty()
             && !decrypt_str_or_original(&config.id, PASSWORD_ENC_VERSION).1
         {
@@ -502,7 +585,7 @@ impl Config {
             let mut path: PathBuf = format!("/tmp/{}", *APP_NAME.read().unwrap()).into();
             fs::create_dir(&path).ok();
             fs::set_permissions(&path, fs::Permissions::from_mode(0o0777)).ok();
-            path.push(format!("ipc{}", postfix));
+            path.push(format!("ipc{postfix}"));
             path.to_str().unwrap_or("").to_owned()
         }
     }
@@ -539,7 +622,7 @@ impl Config {
                 .unwrap_or_default();
         }
         if !rendezvous_server.contains(':') {
-            rendezvous_server = format!("{}:{}", rendezvous_server, RENDEZVOUS_PORT);
+            rendezvous_server = format!("{rendezvous_server}:{RENDEZVOUS_PORT}");
         }
         rendezvous_server
     }
@@ -899,15 +982,13 @@ impl PeerConfig {
                     decrypt_vec_or_original(&config.password, PASSWORD_ENC_VERSION);
                 config.password = password;
                 store = store || store2;
-                if let Some(v) = config.options.get_mut("rdp_password") {
-                    let (password, _, store2) = decrypt_str_or_original(v, PASSWORD_ENC_VERSION);
-                    *v = password;
-                    store = store || store2;
-                }
-                if let Some(v) = config.options.get_mut("os-password") {
-                    let (password, _, store2) = decrypt_str_or_original(v, PASSWORD_ENC_VERSION);
-                    *v = password;
-                    store = store || store2;
+                for opt in ["rdp_password", "os-username", "os-password"] {
+                    if let Some(v) = config.options.get_mut(opt) {
+                        let (encrypted, _, store2) =
+                            decrypt_str_or_original(v, PASSWORD_ENC_VERSION);
+                        *v = encrypted;
+                        store = store || store2;
+                    }
                 }
                 if store {
                     config.store(id);
@@ -925,12 +1006,11 @@ impl PeerConfig {
         let _lock = CONFIG.read().unwrap();
         let mut config = self.clone();
         config.password = encrypt_vec_or_original(&config.password, PASSWORD_ENC_VERSION);
-        if let Some(v) = config.options.get_mut("rdp_password") {
-            *v = encrypt_str_or_original(v, PASSWORD_ENC_VERSION)
+        for opt in ["rdp_password", "os-username", "os-password"] {
+            if let Some(v) = config.options.get_mut(opt) {
+                *v = encrypt_str_or_original(v, PASSWORD_ENC_VERSION)
+            }
         }
-        if let Some(v) = config.options.get_mut("os-password") {
-            *v = encrypt_str_or_original(v, PASSWORD_ENC_VERSION)
-        };
         if let Err(err) = store_path(Self::path(id), config) {
             log::error!("Failed to store config: {}", err);
         }
@@ -942,13 +1022,20 @@ impl PeerConfig {
 
     fn path(id: &str) -> PathBuf {
         //If the id contains invalid chars, encode it
-        let forbidden_paths = Regex::new(r".*[<>:/\\|\?\*].*").unwrap();
-        let id_encoded = if forbidden_paths.is_match(id) {
-            "base64_".to_string() + base64::encode(id, base64::Variant::Original).as_str()
+        let forbidden_paths = Regex::new(r".*[<>:/\\|\?\*].*");
+        let path: PathBuf;
+        if let Ok(forbidden_paths) = forbidden_paths {
+            let id_encoded = if forbidden_paths.is_match(id) {
+                "base64_".to_string() + base64::encode(id, base64::Variant::Original).as_str()
+            } else {
+                id.to_string()
+            };
+            path = [PEERS, id_encoded.as_str()].iter().collect();
         } else {
-            id.to_string()
-        };
-        let path: PathBuf = [PEERS, id_encoded.as_str()].iter().collect();
+            log::warn!("Regex create failed: {:?}", forbidden_paths.err());
+            // fallback for failing to create this regex.
+            path = [PEERS, id.replace(":", "_").as_str()].iter().collect();
+        }
         Config::with_extension(Config::path(path))
     }
 
@@ -998,45 +1085,131 @@ impl PeerConfig {
     serde_field_string!(
         default_view_style,
         deserialize_view_style,
-        "original".to_owned()
+        UserDefaultConfig::read().get("view_style")
     );
     serde_field_string!(
         default_scroll_style,
         deserialize_scroll_style,
-        "scrollauto".to_owned()
+        UserDefaultConfig::read().get("scroll_style")
     );
     serde_field_string!(
         default_image_quality,
         deserialize_image_quality,
-        "balanced".to_owned()
+        UserDefaultConfig::read().get("image_quality")
     );
+
+    fn default_custom_image_quality() -> Vec<i32> {
+        let f: f64 = UserDefaultConfig::read()
+            .get("custom_image_quality")
+            .parse()
+            .unwrap_or(50.0);
+        vec![f as _]
+    }
+
+    fn deserialize_custom_image_quality<'de, D>(deserializer: D) -> Result<Vec<i32>, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        let v: Vec<i32> = de::Deserialize::deserialize(deserializer)?;
+        if v.len() == 1 && v[0] >= 10 && v[0] <= 100 {
+            Ok(v)
+        } else {
+            Ok(Self::default_custom_image_quality())
+        }
+    }
 
     fn deserialize_options<'de, D>(deserializer: D) -> Result<HashMap<String, String>, D::Error>
     where
         D: de::Deserializer<'de>,
     {
         let mut mp: HashMap<String, String> = de::Deserialize::deserialize(deserializer)?;
-        if !mp.contains_key("codec-preference") {
-            mp.insert("codec-preference".to_owned(), "auto".to_owned());
+        let mut key = "codec-preference";
+        if !mp.contains_key(key) {
+            mp.insert(key.to_owned(), UserDefaultConfig::read().get(key));
+        }
+        key = "custom-fps";
+        if !mp.contains_key(key) {
+            mp.insert(key.to_owned(), UserDefaultConfig::read().get(key));
+        }
+        key = "zoom-cursor";
+        if !mp.contains_key(key) {
+            mp.insert(key.to_owned(), UserDefaultConfig::read().get(key));
         }
         Ok(mp)
     }
 }
 
+serde_field_bool!(
+    ShowRemoteCursor,
+    "show_remote_cursor",
+    default_show_remote_cursor,
+    "ShowRemoteCursor::default_show_remote_cursor"
+);
+serde_field_bool!(
+    ShowQualityMonitor,
+    "show_quality_monitor",
+    default_show_quality_monitor,
+    "ShowQualityMonitor::default_show_quality_monitor"
+);
+serde_field_bool!(
+    DisableAudio,
+    "disable_audio",
+    default_disable_audio,
+    "DisableAudio::default_disable_audio"
+);
+serde_field_bool!(
+    EnableFileTransfer,
+    "enable_file_transfer",
+    default_enable_file_transfer,
+    "EnableFileTransfer::default_enable_file_transfer"
+);
+serde_field_bool!(
+    DisableClipboard,
+    "disable_clipboard",
+    default_disable_clipboard,
+    "DisableClipboard::default_disable_clipboard"
+);
+serde_field_bool!(
+    LockAfterSessionEnd,
+    "lock_after_session_end",
+    default_lock_after_session_end,
+    "LockAfterSessionEnd::default_lock_after_session_end"
+);
+serde_field_bool!(
+    PrivacyMode,
+    "privacy_mode",
+    default_privacy_mode,
+    "PrivacyMode::default_privacy_mode"
+);
+
+serde_field_bool!(
+    AllowSwapKey,
+    "allow_swap_key",
+    default_allow_swap_key,
+    "AllowSwapKey::default_allow_swap_key"
+);
+
+serde_field_bool!(
+    ViewOnly,
+    "view_only",
+    default_view_only,
+    "ViewOnly::default_view_only"
+);
+
 #[derive(Debug, Default, Serialize, Deserialize, Clone)]
 pub struct LocalConfig {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string")]
     remote_id: String, // latest used one
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string")]
     kb_layout_type: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_size")]
     size: Size,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_vec_string")]
     pub fav: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_hashmap_string_string")]
     options: HashMap<String, String>,
     // Various data for flutter ui
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_hashmap_string_string")]
     ui_flutter: HashMap<String, String>,
 }
 
@@ -1144,17 +1317,17 @@ impl LocalConfig {
 
 #[derive(Debug, Default, Serialize, Deserialize, Clone)]
 pub struct DiscoveryPeer {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string")]
     pub id: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string")]
     pub username: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string")]
     pub hostname: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string")]
     pub platform: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_bool")]
     pub online: bool,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_hashmap_string_string")]
     pub ip_mac: HashMap<String, String>,
 }
 
@@ -1166,6 +1339,7 @@ impl DiscoveryPeer {
 
 #[derive(Debug, Default, Serialize, Deserialize, Clone)]
 pub struct LanPeers {
+    #[serde(default, deserialize_with = "deserialize_vec_discoverypeer")]
     pub peers: Vec<DiscoveryPeer>,
 }
 
@@ -1201,7 +1375,7 @@ impl LanPeers {
 
 #[derive(Debug, Default, Serialize, Deserialize, Clone)]
 pub struct HwCodecConfig {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_hashmap_string_string")]
     pub options: HashMap<String, String>,
 }
 
@@ -1229,6 +1403,108 @@ impl HwCodecConfig {
     }
 }
 
+#[derive(Debug, Default, Serialize, Deserialize, Clone)]
+pub struct UserDefaultConfig {
+    #[serde(default, deserialize_with = "deserialize_hashmap_string_string")]
+    options: HashMap<String, String>,
+}
+
+impl UserDefaultConfig {
+    pub fn read() -> UserDefaultConfig {
+        let mut cfg = USER_DEFAULT_CONFIG.write().unwrap();
+        if cfg.1.elapsed() > Duration::from_secs(1) {
+            *cfg = (Self::load(), Instant::now());
+        }
+        cfg.0.clone()
+    }
+
+    pub fn load() -> UserDefaultConfig {
+        Config::load_::<UserDefaultConfig>("_default")
+    }
+
+    #[inline]
+    fn store(&self) {
+        Config::store_(self, "_default");
+    }
+
+    pub fn get(&self, key: &str) -> String {
+        match key {
+            "view_style" => self.get_string(key, "original", vec!["adaptive"]),
+            "scroll_style" => self.get_string(key, "scrollauto", vec!["scrollbar"]),
+            "image_quality" => self.get_string(key, "balanced", vec!["best", "low", "custom"]),
+            "codec-preference" => {
+                self.get_string(key, "auto", vec!["vp8", "vp9", "av1", "h264", "h265"])
+            }
+            "custom_image_quality" => self.get_double_string(key, 50.0, 10.0, 100.0),
+            "custom-fps" => self.get_double_string(key, 30.0, 5.0, 120.0),
+            _ => self
+                .options
+                .get(key)
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+        }
+    }
+
+    pub fn set(&mut self, key: String, value: String) {
+        self.options.insert(key, value);
+        self.store();
+    }
+
+    #[inline]
+    fn get_string(&self, key: &str, default: &str, others: Vec<&str>) -> String {
+        match self.options.get(key) {
+            Some(option) => {
+                if others.contains(&option.as_str()) {
+                    option.to_owned()
+                } else {
+                    default.to_owned()
+                }
+            }
+            None => default.to_owned(),
+        }
+    }
+
+    #[inline]
+    fn get_double_string(&self, key: &str, default: f64, min: f64, max: f64) -> String {
+        match self.options.get(key) {
+            Some(option) => {
+                let v: f64 = option.parse().unwrap_or(default);
+                if v >= min && v <= max {
+                    v.to_string()
+                } else {
+                    default.to_string()
+                }
+            }
+            None => default.to_string(),
+        }
+    }
+}
+
+// use default value when field type is wrong
+macro_rules! deserialize_default {
+    ($func_name:ident, $return_type:ty) => {
+        fn $func_name<'de, D>(deserializer: D) -> Result<$return_type, D::Error>
+        where
+            D: de::Deserializer<'de>,
+        {
+            Ok(de::Deserialize::deserialize(deserializer).unwrap_or_default())
+        }
+    };
+}
+
+deserialize_default!(deserialize_string, String);
+deserialize_default!(deserialize_bool, bool);
+deserialize_default!(deserialize_i32, i32);
+deserialize_default!(deserialize_vec_u8, Vec<u8>);
+deserialize_default!(deserialize_vec_string, Vec<String>);
+deserialize_default!(deserialize_vec_i32_string_i32, Vec<(i32, String, i32)>);
+deserialize_default!(deserialize_vec_discoverypeer, Vec<DiscoveryPeer>);
+deserialize_default!(deserialize_keypair, KeyPair);
+deserialize_default!(deserialize_size, Size);
+deserialize_default!(deserialize_hashmap_string_string, HashMap<String, String>);
+deserialize_default!(deserialize_hashmap_string_bool,  HashMap<String, bool>);
+deserialize_default!(deserialize_hashmap_resolutions, HashMap<String, Resolution>);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1241,5 +1517,83 @@ mod tests {
         let cfg: PeerConfig = Default::default();
         let res = toml::to_string_pretty(&cfg);
         assert!(res.is_ok());
+    }
+
+    #[test]
+    fn test_config_deserialize() {
+        let wrong_type_str = r#"
+        id = true
+        enc_id = []
+        password = 1
+        salt = "123456"
+        key_pair = {}
+        key_confirmed = "1"
+        keys_confirmed = 1
+        "#;
+        let cfg = toml::from_str::<Config>(wrong_type_str);
+        assert_eq!(
+            cfg,
+            Ok(Config {
+                salt: "123456".to_string(),
+                ..Default::default()
+            })
+        );
+
+        let wrong_field_str = r#"
+        hello = "world"
+        key_confirmed = true
+        "#;
+        let cfg = toml::from_str::<Config>(wrong_field_str);
+        assert_eq!(
+            cfg,
+            Ok(Config {
+                key_confirmed: true,
+                ..Default::default()
+            })
+        );
+    }
+
+    #[test]
+    fn test_peer_config_deserialize() {
+        let default_peer_config = toml::from_str::<PeerConfig>("").unwrap();
+        // test custom_resolution
+        {
+            let wrong_type_str = r#"
+            view_style = "adaptive"
+            scroll_style = "scrollbar"
+            custom_resolutions = true
+            "#;
+            let mut cfg_to_compare = default_peer_config.clone();
+            cfg_to_compare.view_style = "adaptive".to_string();
+            cfg_to_compare.scroll_style = "scrollbar".to_string();
+            let cfg = toml::from_str::<PeerConfig>(wrong_type_str);
+            assert_eq!(cfg, Ok(cfg_to_compare), "Failed to test wrong_type_str");
+
+            let wrong_type_str = r#"
+            view_style = "adaptive"
+            scroll_style = "scrollbar"
+            [custom_resolutions.0]
+            w = "1920"
+            h = 1080
+            "#;
+            let mut cfg_to_compare = default_peer_config.clone();
+            cfg_to_compare.view_style = "adaptive".to_string();
+            cfg_to_compare.scroll_style = "scrollbar".to_string();
+            let cfg = toml::from_str::<PeerConfig>(wrong_type_str);
+            assert_eq!(cfg, Ok(cfg_to_compare), "Failed to test wrong_type_str");
+
+            let wrong_field_str = r#"
+            [custom_resolutions.0]
+            w = 1920
+            h = 1080
+            hello = "world"
+            [ui_flutter]
+            "#;
+            let mut cfg_to_compare = default_peer_config.clone();
+            cfg_to_compare.custom_resolutions =
+                HashMap::from([("0".to_string(), Resolution { w: 1920, h: 1080 })]);
+            let cfg = toml::from_str::<PeerConfig>(wrong_field_str);
+            assert_eq!(cfg, Ok(cfg_to_compare), "Failed to test wrong_field_str");
+        }
     }
 }

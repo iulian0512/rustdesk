@@ -17,7 +17,7 @@ use core_graphics::{
     display::{kCGNullWindowID, kCGWindowListOptionOnScreenOnly, CGWindowListCopyWindowInfo},
     window::{kCGWindowName, kCGWindowOwnerPID},
 };
-use hbb_common::{bail, log};
+use hbb_common::{allow_err, anyhow::anyhow, bail, log, message_proto::Resolution};
 use include_dir::{include_dir, Dir};
 use objc::{class, msg_send, sel, sel_impl};
 use scrap::{libc::c_void, quartz::ffi::*};
@@ -34,6 +34,17 @@ extern "C" {
     static kAXTrustedCheckOptionPrompt: CFStringRef;
     fn AXIsProcessTrustedWithOptions(options: CFDictionaryRef) -> BOOL;
     fn InputMonitoringAuthStatus(_: BOOL) -> BOOL;
+    fn MacCheckAdminAuthorization() -> BOOL;
+    fn MacGetModeNum(display: u32, numModes: *mut u32) -> BOOL;
+    fn MacGetModes(
+        display: u32,
+        widths: *mut u32,
+        heights: *mut u32,
+        max: u32,
+        numModes: *mut u32,
+    ) -> BOOL;
+    fn MacGetMode(display: u32, width: *mut u32, height: *mut u32) -> BOOL;
+    fn MacSetMode(display: u32, width: u32, height: u32) -> BOOL;
 }
 
 pub fn is_process_trusted(prompt: bool) -> bool {
@@ -171,7 +182,7 @@ pub fn is_installed_daemon(prompt: bool) -> bool {
     false
 }
 
-pub fn uninstall() -> bool {
+pub fn uninstall_service(show_new_window: bool) -> bool {
     // to-do: do together with win/linux about refactory start/stop service
     if !is_installed_daemon(false) {
         return false;
@@ -200,20 +211,28 @@ pub fn uninstall() -> bool {
                 );
                 if uninstalled {
                     crate::ipc::set_option("stop-service", "Y");
+                    let _ = crate::ipc::close_all_instances();
                     // leave ipc a little time
                     std::thread::sleep(std::time::Duration::from_millis(300));
                     std::process::Command::new("launchctl")
                         .args(&["remove", &format!("{}_server", crate::get_full_name())])
                         .status()
                         .ok();
-                    std::process::Command::new("sh")
-                        .arg("-c")
-                        .arg(&format!(
-                            "sleep 0.5; open /Applications/{}.app",
-                            crate::get_app_name(),
-                        ))
-                        .spawn()
-                        .ok();
+                    if show_new_window {
+                        std::process::Command::new("sh")
+                            .arg("-c")
+                            .arg(&format!(
+                                "sleep 0.5; open /Applications/{}.app",
+                                crate::get_app_name(),
+                            ))
+                            .spawn()
+                            .ok();
+                    } else {
+                        std::process::Command::new("pkill")
+                            .arg(crate::get_app_name())
+                            .status()
+                            .ok();
+                    }
                     quit_gui();
                 }
             }
@@ -335,7 +354,7 @@ pub fn get_cursor_data(hcursor: u64) -> ResultType<CursorData> {
         // let cs: id = msg_send![class!(NSColorSpace), sRGBColorSpace];
         for y in 0..(size.height as _) {
             for x in 0..(size.width as _) {
-                let color: id = msg_send![rep, colorAtX:x y:y];
+                let color: id = msg_send![rep, colorAtX:x as cocoa::foundation::NSInteger y:y as cocoa::foundation::NSInteger];
                 // let color: id = msg_send![color, colorUsingColorSpace: cs];
                 if color == nil {
                     continue;
@@ -557,22 +576,134 @@ pub fn hide_dock() {
     }
 }
 
-pub fn check_main_window() {
-    use sysinfo::{ProcessExt, System, SystemExt};
-    let mut sys = System::new();
-    sys.refresh_processes();
-    let app = format!("/Applications/{}.app", crate::get_app_name());
-    let my_uid = sys
-        .process((std::process::id() as i32).into())
-        .map(|x| x.user_id())
-        .unwrap_or_default();
-    for (_, p) in sys.processes().iter() {
-        if p.cmd().len() == 1 && p.user_id() == my_uid && p.cmd()[0].contains(&app) {
-            return;
-        }
+fn check_main_window() -> bool {
+    if crate::check_process("", true) {
+        return true;
     }
+    let app = format!("/Applications/{}.app", crate::get_app_name());
     std::process::Command::new("open")
         .args(["-n", &app])
         .status()
         .ok();
+    false
+}
+
+pub fn handle_application_should_open_untitled_file() {
+    hbb_common::log::debug!("icon clicked on finder");
+    let x = std::env::args().nth(1).unwrap_or_default();
+    if x == "--server" || x == "--cm" || x == "--tray" {
+        if crate::platform::macos::check_main_window() {
+            allow_err!(crate::ipc::send_url_scheme("rustdesk:".into()));
+        }
+    }
+}
+
+pub fn resolutions(name: &str) -> Vec<Resolution> {
+    let mut v = vec![];
+    if let Ok(display) = name.parse::<u32>() {
+        let mut num = 0;
+        unsafe {
+            if YES == MacGetModeNum(display, &mut num) {
+                let (mut widths, mut heights) = (vec![0; num as _], vec![0; num as _]);
+                let mut real_num = 0;
+                if YES
+                    == MacGetModes(
+                        display,
+                        widths.as_mut_ptr(),
+                        heights.as_mut_ptr(),
+                        num,
+                        &mut real_num,
+                    )
+                {
+                    if real_num <= num {
+                        for i in 0..real_num {
+                            let resolution = Resolution {
+                                width: widths[i as usize] as _,
+                                height: heights[i as usize] as _,
+                                ..Default::default()
+                            };
+                            if !v.contains(&resolution) {
+                                v.push(resolution);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    v
+}
+
+pub fn current_resolution(name: &str) -> ResultType<Resolution> {
+    let display = name.parse::<u32>().map_err(|e| anyhow!(e))?;
+    unsafe {
+        let (mut width, mut height) = (0, 0);
+        if NO == MacGetMode(display, &mut width, &mut height) {
+            bail!("MacGetMode failed");
+        }
+        Ok(Resolution {
+            width: width as _,
+            height: height as _,
+            ..Default::default()
+        })
+    }
+}
+
+pub fn change_resolution_directly(name: &str, width: usize, height: usize) -> ResultType<()> {
+    let display = name.parse::<u32>().map_err(|e| anyhow!(e))?;
+    unsafe {
+        if NO == MacSetMode(display, width as _, height as _) {
+            bail!("MacSetMode failed");
+        }
+    }
+    Ok(())
+}
+
+pub fn check_super_user_permission() -> ResultType<bool> {
+    unsafe { Ok(MacCheckAdminAuthorization() == YES) }
+}
+
+pub fn elevate(args: Vec<&str>, prompt: &str) -> ResultType<bool> {
+    let cmd = std::env::current_exe()?;
+    match cmd.to_str() {
+        Some(cmd) => {
+            let mut cmd_with_args = cmd.to_string();
+            for arg in args {
+                cmd_with_args = format!("{} {}", cmd_with_args, arg);
+            }
+            let script = format!(
+                r#"do shell script "{}" with prompt "{}" with administrator privileges"#,
+                cmd_with_args, prompt
+            );
+            match std::process::Command::new("osascript")
+                .arg("-e")
+                .arg(script)
+                .arg(&get_active_username())
+                .status()
+            {
+                Err(e) => {
+                    bail!("Failed to run osascript: {}", e);
+                }
+                Ok(status) => Ok(status.success() && status.code() == Some(0)),
+            }
+        }
+        None => {
+            bail!("Failed to get current exe str");
+        }
+    }
+}
+
+pub struct WakeLock(Option<keepawake::AwakeHandle>);
+
+impl WakeLock {
+    pub fn new(display: bool, idle: bool, sleep: bool) -> Self {
+        WakeLock(
+            keepawake::Builder::new()
+                .display(display)
+                .idle(idle)
+                .sleep(sleep)
+                .create()
+                .ok(),
+        )
+    }
 }

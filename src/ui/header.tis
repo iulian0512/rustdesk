@@ -82,7 +82,7 @@ function editOSPassword(login=false) {
         if (!res) return;
         var a0 = handler.get_option('auto-login') != '';
         var p = (res.password || '').trim();
-        var a = res.auto_login || false;
+        var a = res.autoLogin || false;
         if (p == p0 && a == a0) return;
         if (p != p0) handler.set_option('os-password', p);
         if (a != a0) handler.set_option('auto-login', a ? 'Y' : '');
@@ -144,7 +144,7 @@ class Header: Reactor.Component {
             <span #action>{svg_action}</span>
             <span #display>{svg_display}</span>
             <span #keyboard>{svg_keyboard}</span>
-            {recording_enabled ? <span #recording>{recording ? svg_recording_on : svg_recording_off}</span> : ""}
+            {recording_enabled && qualityMonitorData[4] != "AV1" ? <span #recording>{recording ? svg_recording_on : svg_recording_off}</span> : ""}
             {this.renderKeyboardPop()}
             {this.renderDisplayPop()}
             {this.renderActionPop()}
@@ -161,8 +161,8 @@ class Header: Reactor.Component {
     }
 
     function renderDisplayPop() {
-        var codecs = handler.supported_hwcodec();
-        var show_codec = handler.has_hwcodec() && (codecs[0] || codecs[1]);
+        var codecs = handler.alternative_codecs();
+        var show_codec = codecs[0] || codecs[1] || codecs[2] || codecs[3];
 
         var cursor_embedded = false;
         if ((pi.displays || []).length > 0) {
@@ -186,9 +186,11 @@ class Header: Reactor.Component {
                 {show_codec ? <div>
                 <div .separator />
                 <li #auto type="codec-preference"><span>{svg_checkmark}</span>Auto</li>
+                {codecs[0] ? <li #vp8 type="codec-preference"><span>{svg_checkmark}</span>VP8</li> : ""}
                 <li #vp9 type="codec-preference"><span>{svg_checkmark}</span>VP9</li>
-                {codecs[0] ? <li #h264 type="codec-preference"><span>{svg_checkmark}</span>H264</li> : ""}
-                {codecs[1] ? <li #h265 type="codec-preference"><span>{svg_checkmark}</span>H265</li> : ""}
+                {codecs[1] ? <li #av1 type="codec-preference"><span>{svg_checkmark}</span>AV1</li> : ""}
+                {codecs[2] ? <li #h264 type="codec-preference"><span>{svg_checkmark}</span>H264</li> : ""}
+                {codecs[3] ? <li #h265 type="codec-preference"><span>{svg_checkmark}</span>H265</li> : ""}
                 </div> : ""}
                 <div .separator />
                 {!cursor_embedded && <li #show-remote-cursor .toggle-option><span>{svg_checkmark}</span>{translate('Show remote cursor')}</li>}
@@ -198,6 +200,7 @@ class Header: Reactor.Component {
                 {keyboard_enabled && clipboard_enabled ? <li #disable-clipboard .toggle-option><span>{svg_checkmark}</span>{translate('Disable clipboard')}</li> : ""} 
                 {keyboard_enabled ? <li #lock-after-session-end .toggle-option><span>{svg_checkmark}</span>{translate('Lock after session end')}</li> : ""} 
                 {keyboard_enabled && pi.platform == "Windows" ? <li #privacy-mode><span>{svg_checkmark}</span>{translate('Privacy mode')}</li> : ""}
+                {keyboard_enabled && ((is_osx && pi.platform != "Mac OS") || (!is_osx && pi.platform == "Mac OS")) ? <li #allow_swap_key  .toggle-option><span>{svg_checkmark}</span>{translate('Swap control-command key')}</li> : ""}
             </menu>
         </popup>;
     }
@@ -304,6 +307,16 @@ class Header: Reactor.Component {
         if (pi.current_display == me.index) return;
         handler.switch_display(me.index);
     }
+    
+    event keyup (evt) {
+        if((pi.displays || []).length > 0 && evt.keyCode == 220)
+        { 
+            if (pi.displays.length > pi.current_display) 
+                handler.switch_display(pi.current_display + 1);
+            else
+                handler.switch_display(1);
+        }
+    }
 
     event click $(#transfer-file) {
         handler.transfer_file();
@@ -329,8 +342,8 @@ class Header: Reactor.Component {
          <textarea .outline-focus spellcheck="false" name="text" novalue="input note here" style="overflow: scroll-indicator; width:*; height: 140px; font-size: 1.2em; padding: 0.5em;">{self.conn_note}</textarea>
           </div>, "", function(res=null) {
             if (!res) return;
-            if (!res.text) return;
-            self.conn_note = res.text;
+            if (res.text == null || res.text == undefined) return;
+            self.conn_note = res.text ?? "";
             handler.send_note(res.text);
           }, 280);
     }
@@ -378,7 +391,7 @@ class Header: Reactor.Component {
             togglePrivacyMode(me.id);
         } else if (me.id == "show-quality-monitor") {
             toggleQualityMonitor(me.id);
-        }else if (me.attributes.hasClass("toggle-option")) {
+        } else if (me.attributes.hasClass("toggle-option")) {
             handler.toggle_option(me.id);
             toggleMenuState();
         } else if (!me.attributes.hasClass("selected")) {
@@ -440,7 +453,7 @@ function toggleMenuState() {
     for (var el in $$(menu#keyboard-options>li)) {
         el.attributes.toggleClass("selected", values.indexOf(el.id) >= 0);
     }
-    for (var id in ["show-remote-cursor", "show-quality-monitor", "disable-audio", "enable-file-transfer", "disable-clipboard", "lock-after-session-end"]) {
+    for (var id in ["show-remote-cursor", "show-quality-monitor", "disable-audio", "enable-file-transfer", "disable-clipboard", "lock-after-session-end", "allow_swap_key"]) {
         var el = self.select('#' + id);
         if (el) {
             var value = handler.get_toggle_option(id);
@@ -474,6 +487,14 @@ if (!(is_file_transfer || is_port_forward)) {
 
 handler.updatePi = function(v) {
     pi = v;
+    header.update();
+    if (is_port_forward) {
+        view.windowState = View.WINDOW_MINIMIZED;
+    }
+}
+
+handler.updateDisplays = function(v) {
+    pi.displays = v;
     header.update();
     if (is_port_forward) {
         view.windowState = View.WINDOW_MINIMIZED;

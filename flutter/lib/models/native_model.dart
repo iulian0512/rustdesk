@@ -1,16 +1,15 @@
 import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:external_path/external_path.dart';
 import 'package:ffi/ffi.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_hbb/consts.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:win32/win32.dart' as win32;
 
 import '../common.dart';
 import '../generated_bridge.dart';
@@ -22,8 +21,15 @@ class RgbaFrame extends Struct {
 }
 
 typedef F2 = Pointer<Utf8> Function(Pointer<Utf8>, Pointer<Utf8>);
-typedef F3 = void Function(Pointer<Utf8>, Pointer<Utf8>);
+typedef F3 = Pointer<Uint8> Function(Pointer<Utf8>);
+typedef F4 = Uint64 Function(Pointer<Utf8>);
+typedef F4Dart = int Function(Pointer<Utf8>);
+typedef F5 = Void Function(Pointer<Utf8>);
+typedef F5Dart = void Function(Pointer<Utf8>);
 typedef HandleEvent = Future<void> Function(Map<String, dynamic> evt);
+// pub fn session_register_texture(id: *const char, ptr: usize)
+typedef F6 = Void Function(Pointer<Utf8>, Uint64);
+typedef F6Dart = void Function(Pointer<Utf8>, int);
 
 /// FFI wrapper around the native Rust core.
 /// Hides the platform differences.
@@ -43,8 +49,14 @@ class PlatformFFI {
   final _toAndroidChannel = const MethodChannel('mChannel');
 
   RustdeskImpl get ffiBind => _ffiBind;
+  F3? _session_get_rgba;
+  F4Dart? _session_get_rgba_size;
+  F5Dart? _session_next_rgba;
+  F6Dart? _session_register_texture;
 
   static get localeName => Platform.localeName;
+
+  static get isMain => instance._appType == kAppTypeMain;
 
   static Future<String> getVersion() async {
     PackageInfo packageInfo = await PackageInfo.fromPlatform();
@@ -89,6 +101,47 @@ class PlatformFFI {
     return res;
   }
 
+  Uint8List? getRgba(SessionID sessionId, int bufSize) {
+    if (_session_get_rgba == null) return null;
+    final sessionIdStr = sessionId.toString();
+    var a = sessionIdStr.toNativeUtf8();
+    try {
+      final buffer = _session_get_rgba!(a);
+      if (buffer == nullptr) {
+        return null;
+      }
+      final data = buffer.asTypedList(bufSize);
+      return data;
+    } finally {
+      malloc.free(a);
+    }
+  }
+
+  int? getRgbaSize(SessionID sessionId) {
+    if (_session_get_rgba_size == null) return null;
+    final sessionIdStr = sessionId.toString();
+    var a = sessionIdStr.toNativeUtf8();
+    final bufferSize = _session_get_rgba_size!(a);
+    malloc.free(a);
+    return bufferSize;
+  }
+
+  void nextRgba(SessionID sessionId) {
+    if (_session_next_rgba == null) return;
+    final sessionIdStr = sessionId.toString();
+    final a = sessionIdStr.toNativeUtf8();
+    _session_next_rgba!(a);
+    malloc.free(a);
+  }
+
+  void registerTexture(SessionID sessionId, int ptr) {
+    if (_session_register_texture == null) return;
+    final sessionIdStr = sessionId.toString();
+    final a = sessionIdStr.toNativeUtf8();
+    _session_register_texture!(a, ptr);
+    malloc.free(a);
+  }
+
   /// Init the FFI class, loads the native Rust core library.
   Future<void> init(String appType) async {
     _appType = appType;
@@ -104,6 +157,13 @@ class PlatformFFI {
     debugPrint('initializing FFI $_appType');
     try {
       _translate = dylib.lookupFunction<F2, F2>('translate');
+      _session_get_rgba = dylib.lookupFunction<F3, F3>("session_get_rgba");
+      _session_get_rgba_size =
+          dylib.lookupFunction<F4, F4Dart>("session_get_rgba_size");
+      _session_next_rgba =
+          dylib.lookupFunction<F5, F5Dart>("session_next_rgba");
+      _session_register_texture =
+          dylib.lookupFunction<F6, F6Dart>("session_register_texture");
       try {
         // SYSTEM user failed
         _dir = (await getApplicationDocumentsDirectory()).path;
@@ -112,8 +172,12 @@ class PlatformFFI {
       }
       _ffiBind = RustdeskImpl(dylib);
       if (Platform.isLinux) {
-        // start dbus service, no need to await
-        await _ffiBind.mainStartDbusServer();
+        // Start a dbus service, no need to await
+        _ffiBind.mainStartDbusServer();
+        _ffiBind.mainStartPa();
+      } else if (Platform.isMacOS && isMain) {
+        // Start ipc service for uri links.
+        _ffiBind.mainStartIpcUrlServer();
       }
       _startListenEvent(_ffiBind); // global event
       try {
@@ -168,6 +232,9 @@ class PlatformFFI {
         debugPrint(
             '_appType:$_appType,info1-id:$id,info2-name:$name,dir:$_dir');
       }
+      if (desktopType == DesktopType.cm) {
+        await _ffiBind.cmStartListenIpcThread();
+      }
       await _ffiBind.mainDeviceId(id: id);
       await _ffiBind.mainDeviceName(name: name);
       await _ffiBind.mainSetHomeDir(home: _homeDir);
@@ -196,9 +263,9 @@ class PlatformFFI {
 
   /// Start listening to the Rust core's events and frames.
   void _startListenEvent(RustdeskImpl rustdeskImpl) {
-    () async {
-      await for (final message
-          in rustdeskImpl.startGlobalEventStream(appType: _appType)) {
+    var sink = rustdeskImpl.startGlobalEventStream(appType: _appType);
+    sink.listen((message) {
+      () async {
         try {
           Map<String, dynamic> event = json.decode(message);
           // _tryHandle here may be more flexible than _eventCallback
@@ -210,8 +277,8 @@ class PlatformFFI {
         } catch (e) {
           debugPrint('json.decode fail(): $e');
         }
-      }
-    }();
+      }();
+    });
   }
 
   void setEventCallback(StreamEventHandler fun) async {
@@ -234,5 +301,9 @@ class PlatformFFI {
   invokeMethod(String method, [dynamic arguments]) async {
     if (!isAndroid) return Future<bool>(() => false);
     return await _toAndroidChannel.invokeMethod(method, arguments);
+  }
+
+  void syncAndroidServiceAppDirConfigPath() {
+    invokeMethod(AndroidChannel.kSyncAppDirConfigPath, _dir);
   }
 }

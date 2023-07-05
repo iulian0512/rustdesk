@@ -1,250 +1,123 @@
-#[cfg(any(target_os = "linux", target_os = "windows"))]
-use super::ui_interface::get_option_opt;
-#[cfg(target_os = "linux")]
-use hbb_common::log::{debug, error, info};
-#[cfg(target_os = "linux")]
-use libappindicator::AppIndicator;
-#[cfg(target_os = "linux")]
-use std::env::temp_dir;
-#[cfg(target_os = "windows")]
-use std::sync::{Arc, Mutex};
-#[cfg(target_os = "windows")]
-use trayicon::{MenuBuilder, TrayIconBuilder};
-#[cfg(target_os = "windows")]
-use winit::{
-    event::Event,
-    event_loop::{ControlFlow, EventLoop},
-};
-
-#[cfg(target_os = "windows")]
-#[derive(Clone, Eq, PartialEq, Debug)]
-enum Events {
-    DoubleClickTrayIcon,
-    StopService,
-    StartService,
+pub fn start_tray() {
+    use hbb_common::{allow_err, log};
+    allow_err!(make_tray());
 }
 
-#[cfg(target_os = "windows")]
-pub fn start_tray() {
-    let event_loop = EventLoop::<Events>::with_user_event();
-    let proxy = event_loop.create_proxy();
-    let icon = include_bytes!("../res/tray-icon.ico");
-    let mut tray_icon = TrayIconBuilder::new()
-        .sender_winit(proxy)
-        .icon_from_buffer(icon)
-        .tooltip("RustDesk")
-        .on_double_click(Events::DoubleClickTrayIcon)
-        .build()
-        .unwrap();
-    let old_state = Arc::new(Mutex::new(0));
-    let _sender = crate::ui_interface::SENDER.lock().unwrap();
-    event_loop.run(move |event, _, control_flow| {
-        if get_option_opt("ipc-closed").is_some() {
-            *control_flow = ControlFlow::Exit;
-            return;
-        } else {
-            *control_flow = ControlFlow::Wait;
-        }
-        let stopped = is_service_stopped();
-        let state = if stopped { 2 } else { 1 };
-        let old = *old_state.lock().unwrap();
-        if state != old {
-            hbb_common::log::info!("State changed");
-            let mut m = MenuBuilder::new();
-            if state == 2 {
-                m = m.item(
-                    &crate::client::translate("Start Service".to_owned()),
-                    Events::StartService,
-                );
-            } else {
-                m = m.item(
-                    &crate::client::translate("Stop service".to_owned()),
-                    Events::StopService,
-                );
-            }
-            tray_icon.set_menu(&m).ok();
-            *old_state.lock().unwrap() = state;
-        }
-
-        match event {
-            Event::UserEvent(e) => match e {
-                Events::DoubleClickTrayIcon => {
-                    crate::run_me(Vec::<&str>::new()).ok();
-                }
-                Events::StopService => {
-                    crate::ipc::set_option("stop-service", "Y");
-                }
-                Events::StartService => {
-                    crate::ipc::set_option("stop-service", "");
-                }
-            },
-            _ => (),
-        }
-    });
-}
-
-/// Start a tray icon in Linux
-///
-/// [Block]
-/// This function will block current execution, show the tray icon and handle events.
-#[cfg(target_os = "linux")]
-pub fn start_tray() {
-    use std::time::Duration;
-
-    use glib::{clone, Continue};
-    use gtk::traits::{GtkMenuItemExt, MenuShellExt, WidgetExt};
-
-    info!("configuring tray");
-    // init gtk context
-    if let Err(err) = gtk::init() {
-        error!("Error when starting the tray: {}", err);
-        return;
-    }
-    if let Some(mut appindicator) = get_default_app_indicator() {
-        let mut menu = gtk::Menu::new();
-        let stoped = is_service_stopped();
-        // start/stop service
-        let label = if stoped {
-            crate::client::translate("Start Service".to_owned())
-        } else {
-            crate::client::translate("Stop service".to_owned())
+pub fn make_tray() -> hbb_common::ResultType<()> {
+    // https://github.com/tauri-apps/tray-icon/blob/dev/examples/tao.rs
+    use hbb_common::anyhow::Context;
+    use tao::event_loop::{ControlFlow, EventLoopBuilder};
+    use tray_icon::{
+        menu::{Menu, MenuEvent, MenuItem},
+        TrayEvent, TrayIconBuilder,
+    };
+    let icon;
+    #[cfg(target_os = "macos")]
+    {
+        let mode = dark_light::detect();
+        const LIGHT: &[u8] = include_bytes!("../res/mac-tray-light-x2.png");
+        const DARK: &[u8] = include_bytes!("../res/mac-tray-dark-x2.png");
+        icon = match mode {
+            dark_light::Mode::Dark => LIGHT,
+            _ => DARK,
         };
-        let menu_item_service = gtk::MenuItem::with_label(label.as_str());
-        menu_item_service.connect_activate(move |_| {
-            let _lock = crate::ui_interface::SENDER.lock().unwrap();
-            change_service_state();
-        });
-        menu.append(&menu_item_service);
-        // show tray item
-        menu.show_all();
-        appindicator.set_menu(&mut menu);
-        // start event loop
-        info!("Setting tray event loop");
-        // check the connection status for every second
-        glib::timeout_add_local(
-            Duration::from_secs(1),
-            clone!(@strong menu_item_service as item => move || {
-                let _lock = crate::ui_interface::SENDER.lock().unwrap();
-                update_tray_service_item(&item);
-                // continue to trigger the next status check
-                Continue(true)
-            }),
-        );
-        gtk::main();
-    } else {
-        error!("Tray process exit now");
     }
-}
-
-#[cfg(target_os = "linux")]
-fn change_service_state() {
-    if is_service_stopped() {
-        debug!("Now try to start service");
-        crate::ipc::set_option("stop-service", "");
-    } else {
-        debug!("Now try to stop service");
-        crate::ipc::set_option("stop-service", "Y");
+    #[cfg(not(target_os = "macos"))]
+    {
+        icon = include_bytes!("../res/tray-icon.ico");
     }
-}
+    let (icon_rgba, icon_width, icon_height) = {
+        let image = image::load_from_memory(icon)
+            .context("Failed to open icon path")?
+            .into_rgba8();
+        let (width, height) = image.dimensions();
+        let rgba = image.into_raw();
+        (rgba, width, height)
+    };
+    let icon = tray_icon::icon::Icon::from_rgba(icon_rgba, icon_width, icon_height)
+        .context("Failed to open icon")?;
 
-#[cfg(target_os = "linux")]
-#[inline]
-fn update_tray_service_item(item: &gtk::MenuItem) {
-    use gtk::traits::GtkMenuItemExt;
+    let event_loop = EventLoopBuilder::new().build();
 
-    if is_service_stopped() {
-        item.set_label(&crate::client::translate("Start Service".to_owned()));
-    } else {
-        item.set_label(&crate::client::translate("Stop service".to_owned()));
-    }
-}
+    let tray_menu = Menu::new();
+    let quit_i = MenuItem::new(crate::client::translate("Exit".to_owned()), true, None);
+    let open_i = MenuItem::new(crate::client::translate("Open".to_owned()), true, None);
+    tray_menu.append_items(&[&open_i, &quit_i]);
 
-#[cfg(target_os = "linux")]
-fn get_default_app_indicator() -> Option<AppIndicator> {
-    use libappindicator::AppIndicatorStatus;
-    use std::io::Write;
+    let _tray_icon = Some(
+        TrayIconBuilder::new()
+            .with_menu(Box::new(tray_menu))
+            .with_tooltip(format!(
+                "{} {}",
+                crate::get_app_name(),
+                crate::lang::translate("Service is running".to_owned())
+            ))
+            .with_icon(icon)
+            .build()?,
+    );
 
-    let icon = include_bytes!("../res/icon.png");
-    // appindicator does not support icon buffer, so we write it to tmp folder
-    let mut icon_path = temp_dir();
-    icon_path.push("RustDesk");
-    icon_path.push("rustdesk.png");
-    match std::fs::File::create(icon_path.clone()) {
-        Ok(mut f) => {
-            f.write_all(icon).unwrap();
-            // set .png icon file to be writable
-            // this ensures successful file rewrite when switching between x11 and wayland.
-            let mut perm = f.metadata().unwrap().permissions();
-            if perm.readonly() {
-                perm.set_readonly(false);
-                f.set_permissions(perm).unwrap();
-            }
+    let menu_channel = MenuEvent::receiver();
+    let tray_channel = TrayEvent::receiver();
+    let mut docker_hiden = false;
+
+    let open_func = move || {
+        if cfg!(not(feature = "flutter"))
+        {
+        crate::run_me::<&str>(vec![]).ok();
+        return;
         }
-        Err(err) => {
-            error!("Error when writing icon to {:?}: {}", icon_path, err);
-            return None;
+        #[cfg(target_os = "macos")]
+        crate::platform::macos::handle_application_should_open_untitled_file();
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            use std::process::Command;
+            Command::new("cmd")
+                .arg("/c")
+                .arg("start rustdesk://")
+                .creation_flags(winapi::um::winbase::CREATE_NO_WINDOW)
+                .spawn()
+                .ok();
         }
-    }
-    debug!("write temp icon complete");
-    let mut appindicator = AppIndicator::new("RustDesk", icon_path.to_str().unwrap_or("rustdesk"));
-    appindicator.set_label("RustDesk", "A remote control software.");
-    appindicator.set_status(AppIndicatorStatus::Active);
-    Some(appindicator)
-}
-
-/// Check if service is stoped.
-/// Return [`true`] if service is stoped, [`false`] otherwise.
-#[inline]
-#[cfg(any(target_os = "linux", target_os = "windows"))]
-fn is_service_stopped() -> bool {
-    if let Some(v) = get_option_opt("stop-service") {
-        v == "Y"
-    } else {
-        false
-    }
-}
-
-#[cfg(target_os = "macos")]
-pub fn make_tray() {
-    extern "C" {
-        fn BackingScaleFactor() -> f32;
-    }
-    let f = unsafe { BackingScaleFactor() };
-    use tray_item::TrayItem;
-    let mode = dark_light::detect();
-    let icon_path = match mode {
-        dark_light::Mode::Dark => {
-            // still show big overflow icon in my test, so still use x1 png.
-            // let's do it with objc with svg support later.
-            // or use another tray crate, or find out in tauri (it has tray support)
-            if f > 2. {
-                "mac-tray-light-x2.png"
-            } else {
-                "mac-tray-light.png"
-            }
-        }
-        dark_light::Mode::Light => {
-            if f > 2. {
-                "mac-tray-dark-x2.png"
-            } else {
-                "mac-tray-dark.png"
-            }
+        #[cfg(target_os = "linux")]
+        if !std::process::Command::new("xdg-open")
+            .arg("rustdesk://")
+            .spawn()
+            .is_ok()
+        {
+            crate::run_me::<&str>(vec![]).ok();
         }
     };
-    if let Ok(mut tray) = TrayItem::new(&crate::get_app_name(), icon_path) {
-        tray.add_label(&format!(
-            "{} {}",
-            crate::get_app_name(),
-            crate::lang::translate("Service is running".to_owned())
-        ))
-        .ok();
 
-        let inner = tray.inner_mut();
-        inner.add_quit_item(&crate::lang::translate("Quit".to_owned()));
-        inner.display();
-    } else {
-        loop {
-            std::thread::sleep(std::time::Duration::from_secs(3));
+    event_loop.run(move |_event, _, control_flow| {
+        if !docker_hiden {
+            #[cfg(target_os = "macos")]
+            crate::platform::macos::hide_dock();
+            docker_hiden = true;
         }
-    }
+        *control_flow = ControlFlow::WaitUntil(
+            std::time::Instant::now() + std::time::Duration::from_millis(100),
+        );
+
+        if let Ok(event) = menu_channel.try_recv() {
+            if event.id == quit_i.id() {
+                /* failed in windows, seems no permission to check system process
+                if !crate::check_process("--server", false) {
+                    *control_flow = ControlFlow::Exit;
+                    return;
+                }
+                */
+                crate::platform::uninstall_service(false);
+            } else if event.id == open_i.id() {
+                open_func();
+            }
+        }
+
+        if let Ok(_event) = tray_channel.try_recv() {
+            #[cfg(target_os = "windows")]
+            if _event.event == tray_icon::ClickEvent::Left {
+                open_func();
+            }
+        }
+    });
 }

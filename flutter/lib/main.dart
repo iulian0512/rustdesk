@@ -1,22 +1,24 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:bot_toast/bot_toast.dart';
 import 'package:desktop_multi_window/desktop_multi_window.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_hbb/models/state_model.dart';
 import 'package:flutter_hbb/desktop/pages/desktop_tab_page.dart';
-import 'package:flutter_hbb/desktop/pages/server_page.dart';
 import 'package:flutter_hbb/desktop/pages/install_page.dart';
+import 'package:flutter_hbb/desktop/pages/server_page.dart';
 import 'package:flutter_hbb/desktop/screen/desktop_file_transfer_screen.dart';
 import 'package:flutter_hbb/desktop/screen/desktop_port_forward_screen.dart';
 import 'package:flutter_hbb/desktop/screen/desktop_remote_screen.dart';
 import 'package:flutter_hbb/desktop/widgets/refresh_wrapper.dart';
+import 'package:flutter_hbb/models/state_model.dart';
+import 'package:flutter_hbb/plugin/handlers.dart';
 import 'package:flutter_hbb/utils/multi_window_manager.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:get/get.dart';
 import 'package:provider/provider.dart';
 import 'package:window_manager/window_manager.dart';
-import 'package:bot_toast/bot_toast.dart';
 
 // import 'package:window_manager/window_manager.dart';
 
@@ -108,42 +110,48 @@ Future<void> initEnv(String appType) async {
   await initGlobalFFI();
   // await Firebase.initializeApp();
   _registerEventHandler();
+  // Update the system theme.
+  updateSystemWindowTheme();
 }
 
 void runMainApp(bool startService) async {
   // register uni links
-  initUniLinks();
   await initEnv(kAppTypeMain);
   // trigger connection status updater
   await bind.mainCheckConnectStatus();
   if (startService) {
-    // await windowManager.ensureInitialized();
     gFFI.serverModel.startService();
+    bind.pluginSyncUi(syncTo: kAppTypeMain);
+    bind.pluginListReload();
   }
   gFFI.userModel.refreshCurrentUser();
   runApp(App());
-  // restore the location of the main window before window hide or show
-  await restoreWindowPosition(WindowType.Main);
-  // check the startup argument, if we successfully handle the argument, we keep the main window hidden.
-  if (checkArguments()) {
-    windowManager.hide();
-  } else {
-    windowManager.show();
-    windowManager.focus();
-    // move registration of active main window here to prevent async visible check.
-    rustDeskWinManager.registerActiveWindow(kWindowMainId);
-  }
-  // set window option
+  // Set window option.
   WindowOptions windowOptions = getHiddenTitleBarWindowOptions();
   windowManager.waitUntilReadyToShow(windowOptions, () async {
+    // Restore the location of the main window before window hide or show.
+    await restoreWindowPosition(WindowType.Main);
+    // Check the startup argument, if we successfully handle the argument, we keep the main window hidden.
+    final handledByUniLinks = await initUniLinks();
+    debugPrint("handled by uni links: $handledByUniLinks");
+    if (handledByUniLinks || checkArguments()) {
+      windowManager.hide();
+    } else {
+      windowManager.show();
+      windowManager.focus();
+      // Move registration of active main window here to prevent from async visible check.
+      rustDeskWinManager.registerActiveWindow(kWindowMainId);
+    }
     windowManager.setOpacity(1);
+    windowManager.setTitle(getWindowName());
   });
-  windowManager.setTitle(getWindowName());
 }
 
 void runMobileApp() async {
   await initEnv(kAppTypeMain);
   if (isAndroid) androidChannelInit();
+  platformFFI.syncAndroidServiceAppDirConfigPath();
+  gFFI.userModel.refreshCurrentUser();
   runApp(App());
 }
 
@@ -206,38 +214,61 @@ void runMultiWindow(
 }
 
 void runConnectionManagerScreen(bool hide) async {
-  await initEnv(kAppTypeMain);
+  await initEnv(kAppTypeConnectionManager);
   _runApp(
     '',
     const DesktopServerPage(),
     MyTheme.currentThemeMode(),
   );
   if (hide) {
-    hideCmWindow();
+    await hideCmWindow(isStartup: true);
   } else {
-    showCmWindow();
+    await showCmWindow(isStartup: true);
+  }
+  // Start the uni links handler and redirect links to Native, not for Flutter.
+  listenUniLinks(handleByFlutter: false);
+}
+
+showCmWindow({bool isStartup = false}) async {
+  if (isStartup) {
+    WindowOptions windowOptions = getHiddenTitleBarWindowOptions(
+        size: kConnectionManagerWindowSizeClosedChat);
+    windowManager.waitUntilReadyToShow(windowOptions, () async {
+      bind.mainHideDocker();
+      await windowManager.show();
+      await Future.wait([windowManager.focus(), windowManager.setOpacity(1)]);
+      // ensure initial window size to be changed
+      await windowManager.setSizeAlignment(
+          kConnectionManagerWindowSizeClosedChat, Alignment.topRight);
+    });
+  } else {
+    if (await windowManager.getOpacity() != 1) {
+      await windowManager.setOpacity(1);
+      await windowManager.focus();
+      await windowManager.minimize(); //needed
+      await windowManager.setSizeAlignment(
+          kConnectionManagerWindowSizeClosedChat, Alignment.topRight);
+      window_on_top(null);
+    }
   }
 }
 
-void showCmWindow() {
-  WindowOptions windowOptions =
-      getHiddenTitleBarWindowOptions(size: kConnectionManagerWindowSize);
-  windowManager.waitUntilReadyToShow(windowOptions, () async {
-    await windowManager.show();
-    await Future.wait([windowManager.focus(), windowManager.setOpacity(1)]);
-    // ensure initial window size to be changed
-    await windowManager.setSizeAlignment(
-        kConnectionManagerWindowSize, Alignment.topRight);
-  });
-}
-
-void hideCmWindow() {
-  WindowOptions windowOptions =
-      getHiddenTitleBarWindowOptions(size: kConnectionManagerWindowSize);
-  windowManager.setOpacity(0);
-  windowManager.waitUntilReadyToShow(windowOptions, () async {
+hideCmWindow({bool isStartup = false}) async {
+  if (isStartup) {
+    WindowOptions windowOptions = getHiddenTitleBarWindowOptions(
+        size: kConnectionManagerWindowSizeClosedChat);
+    windowManager.setOpacity(0);
+    windowManager.waitUntilReadyToShow(windowOptions, () async {
+      bind.mainHideDocker();
+      await windowManager.minimize();
+      await windowManager.hide();
+    });
+  } else {
+    await windowManager.setOpacity(0);
+    bind.mainHideDocker();
+    await windowManager.minimize();
     await windowManager.hide();
-  });
+  }
 }
 
 void _runApp(
@@ -277,17 +308,20 @@ void _runApp(
 void runInstallPage() async {
   await windowManager.ensureInitialized();
   await initEnv(kAppTypeMain);
-  _runApp('', const InstallPage(), ThemeMode.light);
-  windowManager.waitUntilReadyToShow(
-      WindowOptions(size: Size(800, 600), center: true), () async {
+  _runApp('', const InstallPage(), MyTheme.currentThemeMode());
+  WindowOptions windowOptions =
+      getHiddenTitleBarWindowOptions(size: Size(800, 600), center: true);
+  windowManager.waitUntilReadyToShow(windowOptions, () async {
     windowManager.show();
     windowManager.focus();
     windowManager.setOpacity(1);
     windowManager.setAlignment(Alignment.center); // ensure
+    windowManager.setTitle(getWindowName());
   });
 }
 
-WindowOptions getHiddenTitleBarWindowOptions({Size? size}) {
+WindowOptions getHiddenTitleBarWindowOptions(
+    {Size? size, bool center = false}) {
   var defaultTitleBarStyle = TitleBarStyle.hidden;
   // we do not hide titlebar on win7 because of the frame overflow.
   if (kUseCompatibleUiMode) {
@@ -295,7 +329,7 @@ WindowOptions getHiddenTitleBarWindowOptions({Size? size}) {
   }
   return WindowOptions(
     size: size,
-    center: false,
+    center: center,
     backgroundColor: Colors.transparent,
     skipTaskbar: false,
     titleBarStyle: defaultTitleBarStyle,
@@ -325,6 +359,8 @@ class _AppState extends State<App> {
         to = ThemeMode.light;
       }
       Get.changeThemeMode(to);
+      // Synchronize the window theme of the system.
+      updateSystemWindowTheme();
       if (desktopType == DesktopType.main) {
         bind.mainChangeTheme(dark: to.toShortString());
       }
@@ -344,6 +380,7 @@ class _AppState extends State<App> {
           ChangeNotifierProvider.value(value: gFFI.imageModel),
           ChangeNotifierProvider.value(value: gFFI.cursorModel),
           ChangeNotifierProvider.value(value: gFFI.canvasModel),
+          ChangeNotifierProvider.value(value: gFFI.peerTabModel),
         ],
         child: GetMaterialApp(
           navigatorKey: globalKey,
@@ -406,6 +443,12 @@ _registerEventHandler() {
     });
     platformFFI.registerEventHandler('language', 'language', (_) async {
       reloadAllWindows();
+    });
+  }
+  // Register native handlers.
+  if (isDesktop) {
+    platformFFI.registerEventHandler('native_ui', 'native_ui', (evt) async {
+      NativeUiHandler.instance.onEvent(evt);
     });
   }
 }

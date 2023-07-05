@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:math';
 import 'dart:ui' as ui;
 
@@ -45,8 +46,14 @@ class InputModel {
   var command = false;
 
   // trackpad
-  var trackpadScrollDistance = Offset.zero;
+  var _trackpadLastDelta = Offset.zero;
+  var _stopFling = true;
+  var _fling = false;
   Timer? _flingTimer;
+  final _flingBaseDelay = 30;
+  // trackpad, peer linux
+  final _trackpadSpeed = 0.06;
+  var _trackpadScrollUnsent = Offset.zero;
 
   // mouse
   final isPhysicalMouse = false.obs;
@@ -55,12 +62,25 @@ class InputModel {
 
   get id => parent.target?.id ?? "";
 
-  InputModel(this.parent);
+  late final SessionID sessionId;
+
+  bool get keyboardPerm => parent.target!.ffiModel.keyboard;
+
+  InputModel(this.parent) {
+    sessionId = parent.target!.sessionId;
+  }
 
   KeyEventResult handleRawKeyEvent(FocusNode data, RawKeyEvent e) {
-    bind.sessionGetKeyboardMode(id: id).then((result) {
-      keyboardMode = result.toString();
-    });
+    if (isDesktop && !stateGlobal.grabKeyboard) {
+      return KeyEventResult.handled;
+    }
+
+    // * Currently mobile does not enable map mode
+    if (isDesktop) {
+      bind.sessionGetKeyboardMode(sessionId: sessionId).then((result) {
+        keyboardMode = result.toString();
+      });
+    }
 
     final key = e.logicalKey;
     if (e is RawKeyDownEvent) {
@@ -93,10 +113,9 @@ class InputModel {
       }
     }
 
-    if (keyboardMode == 'map') {
+    // * Currently mobile does not enable map mode
+    if (isDesktop && keyboardMode == 'map') {
       mapKeyboardMode(e);
-    } else if (keyboardMode == 'translate') {
-      legacyKeyboardMode(e);
     } else {
       legacyKeyboardMode(e);
     }
@@ -105,44 +124,41 @@ class InputModel {
   }
 
   void mapKeyboardMode(RawKeyEvent e) {
-    int scanCode;
-    int keyCode;
+    int positionCode = -1;
+    int platformCode = -1;
     bool down;
 
     if (e.data is RawKeyEventDataMacOs) {
       RawKeyEventDataMacOs newData = e.data as RawKeyEventDataMacOs;
-      scanCode = newData.keyCode;
-      keyCode = newData.keyCode;
+      positionCode = newData.keyCode;
+      platformCode = newData.keyCode;
     } else if (e.data is RawKeyEventDataWindows) {
       RawKeyEventDataWindows newData = e.data as RawKeyEventDataWindows;
-      scanCode = newData.scanCode;
-      keyCode = newData.keyCode;
+      positionCode = newData.scanCode;
+      platformCode = newData.keyCode;
     } else if (e.data is RawKeyEventDataLinux) {
       RawKeyEventDataLinux newData = e.data as RawKeyEventDataLinux;
       // scanCode and keyCode of RawKeyEventDataLinux are incorrect.
       // 1. scanCode means keycode
       // 2. keyCode means keysym
-      scanCode = 0;
-      keyCode = newData.scanCode;
+      positionCode = newData.scanCode;
+      platformCode = newData.keyCode;
     } else if (e.data is RawKeyEventDataAndroid) {
       RawKeyEventDataAndroid newData = e.data as RawKeyEventDataAndroid;
-      scanCode = newData.scanCode + 8;
-      keyCode = newData.keyCode;
-    } else {
-      scanCode = -1;
-      keyCode = -1;
-    }
+      positionCode = newData.scanCode + 8;
+      platformCode = newData.keyCode;
+    } else {}
 
     if (e is RawKeyDownEvent) {
       down = true;
     } else {
       down = false;
     }
-    inputRawKey(e.character ?? '', keyCode, scanCode, down);
+    inputRawKey(e.character ?? '', platformCode, positionCode, down);
   }
 
   /// Send raw Key Event
-  void inputRawKey(String name, int keyCode, int scanCode, bool down) {
+  void inputRawKey(String name, int platformCode, int positionCode, bool down) {
     const capslock = 1;
     const numlock = 2;
     const scrolllock = 3;
@@ -160,10 +176,10 @@ class InputModel {
       lockModes |= (1 << scrolllock);
     }
     bind.sessionHandleFlutterKeyEvent(
-        id: id,
+        sessionId: sessionId,
         name: name,
-        keycode: keyCode,
-        scancode: scanCode,
+        platformCode: platformCode,
+        positionCode: positionCode,
         lockModes: lockModes,
         downOrUp: down);
   }
@@ -193,9 +209,9 @@ class InputModel {
   /// [down] indicates the key's state(down or up).
   /// [press] indicates a click event(down and up).
   void inputKey(String name, {bool? down, bool? press}) {
-    if (!parent.target!.ffiModel.keyboard()) return;
+    if (!keyboardPerm) return;
     bind.sessionInputKey(
-        id: id,
+        sessionId: sessionId,
         name: name,
         down: down ?? false,
         press: press ?? true,
@@ -255,7 +271,7 @@ class InputModel {
   /// Send scroll event with scroll distance [y].
   void scroll(int y) {
     bind.sessionSendMouse(
-        id: id,
+        sessionId: sessionId,
         msg: json
             .encode(modify({'id': id, 'type': 'wheel', 'y': y.toString()})));
   }
@@ -276,9 +292,9 @@ class InputModel {
 
   /// Send mouse press event.
   void sendMouse(String type, MouseButtons button) {
-    if (!parent.target!.ffiModel.keyboard()) return;
+    if (!keyboardPerm) return;
     bind.sessionSendMouse(
-        id: id,
+        sessionId: sessionId,
         msg: json.encode(modify({'type': type, 'buttons': button.value})));
   }
 
@@ -288,19 +304,21 @@ class InputModel {
       resetModifiers();
     }
     _flingTimer?.cancel();
-    bind.sessionEnterOrLeave(id: id, enter: enter);
+    bind.sessionEnterOrLeave(sessionId: sessionId, enter: enter);
   }
 
   /// Send mouse movement event with distance in [x] and [y].
   void moveMouse(double x, double y) {
-    if (!parent.target!.ffiModel.keyboard()) return;
+    if (!keyboardPerm) return;
     var x2 = x.toInt();
     var y2 = y.toInt();
     bind.sessionSendMouse(
-        id: id, msg: json.encode(modify({'x': '$x2', 'y': '$y2'})));
+        sessionId: sessionId,
+        msg: json.encode(modify({'x': '$x2', 'y': '$y2'})));
   }
 
   void onPointHoverImage(PointerHoverEvent e) {
+    _stopFling = true;
     if (e.kind != ui.PointerDeviceKind.mouse) return;
     if (!isPhysicalMouse.value) {
       isPhysicalMouse.value = true;
@@ -310,61 +328,109 @@ class InputModel {
     }
   }
 
-/*
-  int _signOrZero(num x) {
-    if (x == 0) {
-      return 0;
-    } else {
-      return x > 0 ? 1 : -1;
-    }
+  void onPointerPanZoomStart(PointerPanZoomStartEvent e) {
+    _stopFling = true;
   }
-
-  void onPointerPanZoomStart(PointerPanZoomStartEvent e) {}
 
   // https://docs.flutter.dev/release/breaking-changes/trackpad-gestures
   // TODO(support zoom in/out)
   void onPointerPanZoomUpdate(PointerPanZoomUpdateEvent e) {
-    var delta = e.panDelta;
-    trackpadScrollDistance += delta;
-    bind.sessionSendMouse(
-        id: id,
-        msg:
-            '{"type": "trackpad", "x": "${delta.dx.toInt()}", "y": "${delta.dy.toInt()}"}');
+    final delta = e.panDelta;
+    _trackpadLastDelta = delta;
+
+    var x = delta.dx.toInt();
+    var y = delta.dy.toInt();
+    if (parent.target?.ffiModel.pi.platform == kPeerPlatformLinux) {
+      _trackpadScrollUnsent += (delta * _trackpadSpeed);
+      x = _trackpadScrollUnsent.dx.truncate();
+      y = _trackpadScrollUnsent.dy.truncate();
+      _trackpadScrollUnsent -= Offset(x.toDouble(), y.toDouble());
+    } else {
+      if (x == 0 && y == 0) {
+        final thr = 0.1;
+        if (delta.dx.abs() > delta.dy.abs()) {
+          x = delta.dx > thr ? 1 : (delta.dx < -thr ? -1 : 0);
+        } else {
+          y = delta.dy > thr ? 1 : (delta.dy < -thr ? -1 : 0);
+        }
+      }
+    }
+    if (x != 0 || y != 0) {
+      bind.sessionSendMouse(
+          sessionId: sessionId,
+          msg: '{"type": "trackpad", "x": "$x", "y": "$y"}');
+    }
   }
 
-  // Simple simulation for fling.
-  void _scheduleFling(var x, y, dx, dy) {
-    if (dx <= 0 && dy <= 0) {
+  void _scheduleFling(double x, double y, int delay) {
+    if ((x == 0 && y == 0) || _stopFling) {
+      _fling = false;
       return;
     }
-    _flingTimer = Timer(Duration(milliseconds: 10), () {
+
+    _flingTimer = Timer(Duration(milliseconds: delay), () {
+      if (_stopFling) {
+        _fling = false;
+        return;
+      }
+
+      final d = 0.97;
+      x *= d;
+      y *= d;
+
+      // Try set delta (x,y) and delay.
+      var dx = x.toInt();
+      var dy = y.toInt();
+      if (parent.target?.ffiModel.pi.platform == kPeerPlatformLinux) {
+        dx = (x * _trackpadSpeed).toInt();
+        dy = (y * _trackpadSpeed).toInt();
+      }
+
+      var delay = _flingBaseDelay;
+
+      if (dx == 0 && dy == 0) {
+        _fling = false;
+        return;
+      }
+
       bind.sessionSendMouse(
-          id: id, msg: '{"type": "trackpad", "x": "$x", "y": "$y"}');
-      dx--;
-      dy--;
-      if (dx == 0) {
-        x = 0;
-      }
-      if (dy == 0) {
-        y = 0;
-      }
-      _scheduleFling(x, y, dx, dy);
+          sessionId: sessionId,
+          msg: '{"type": "trackpad", "x": "$dx", "y": "$dy"}');
+      _scheduleFling(x, y, delay);
     });
   }
 
-  void onPointerPanZoomEnd(PointerPanZoomEndEvent e) {
-    var x = _signOrZero(trackpadScrollDistance.dx);
-    var y = _signOrZero(trackpadScrollDistance.dy);
-    var dx = trackpadScrollDistance.dx.abs() ~/ 40;
-    var dy = trackpadScrollDistance.dy.abs() ~/ 40;
-    _scheduleFling(x, y, dx, dy);
-
-    trackpadScrollDistance = Offset.zero;
+  void waitLastFlingDone() {
+    if (_fling) {
+      _stopFling = true;
+    }
+    for (var i = 0; i < 5; i++) {
+      if (!_fling) {
+        break;
+      }
+      sleep(Duration(milliseconds: 10));
+    }
+    _flingTimer?.cancel();
   }
-*/
+
+  void onPointerPanZoomEnd(PointerPanZoomEndEvent e) {
+    waitLastFlingDone();
+    _stopFling = false;
+
+    // 2.0 is an experience value
+    double minFlingValue = 2.0;
+    if (_trackpadLastDelta.dx.abs() > minFlingValue ||
+        _trackpadLastDelta.dy.abs() > minFlingValue) {
+      _fling = true;
+      _scheduleFling(
+          _trackpadLastDelta.dx, _trackpadLastDelta.dy, _flingBaseDelay);
+    }
+    _trackpadLastDelta = Offset.zero;
+  }
 
   void onPointDownImage(PointerDownEvent e) {
     debugPrint("onPointDownImage");
+    _stopFling = true;
     if (e.kind != ui.PointerDeviceKind.mouse) {
       if (isPhysicalMouse.value) {
         isPhysicalMouse.value = false;
@@ -404,7 +470,8 @@ class InputModel {
         dy = 1;
       }
       bind.sessionSendMouse(
-          id: id, msg: '{"type": "wheel", "x": "$dx", "y": "$dy"}');
+          sessionId: sessionId,
+          msg: '{"type": "wheel", "x": "$dx", "y": "$dy"}');
     }
   }
 
@@ -415,7 +482,50 @@ class InputModel {
         'type': _kMouseEventMove,
       });
 
-  void handleMouse(Map<String, dynamic> evt) {
+  void tryMoveEdgeOnExit(Offset pos) => handleMouse(
+        {
+          'x': pos.dx,
+          'y': pos.dy,
+          'buttons': 0,
+          'type': _kMouseEventMove,
+        },
+        onExit: true,
+      );
+
+  int trySetNearestRange(int v, int min, int max, int n) {
+    if (v < min && v >= min - n) {
+      v = min;
+    }
+    if (v > max && v <= max + n) {
+      v = max;
+    }
+    return v;
+  }
+
+  Offset setNearestEdge(double x, double y, Display d) {
+    double left = x - d.x;
+    double right = d.x + d.width - 1 - x;
+    double top = y - d.y;
+    double bottom = d.y + d.height - 1 - y;
+    if (left < right && left < top && left < bottom) {
+      x = d.x;
+    }
+    if (right < left && right < top && right < bottom) {
+      x = d.x + d.width - 1;
+    }
+    if (top < left && top < right && top < bottom) {
+      y = d.y;
+    }
+    if (bottom < left && bottom < right && bottom < top) {
+      y = d.y + d.height - 1;
+    }
+    return Offset(x, y);
+  }
+
+  void handleMouse(
+    Map<String, dynamic> evt, {
+    bool onExit = false,
+  }) {
     double x = evt['x'];
     double y = max(0.0, evt['y']);
     final cursorModel = parent.target!.cursorModel;
@@ -454,18 +564,21 @@ class InputModel {
         return;
     }
     evt['type'] = type;
-    if (isDesktop) {
-      y = y - stateGlobal.tabBarHeight;
-    }
+    y -= CanvasModel.topToEdge;
+    x -= CanvasModel.leftToEdge;
     final canvasModel = parent.target!.canvasModel;
+    final nearThr = 3;
+    var nearRight = (canvasModel.size.width - x) < nearThr;
+    var nearBottom = (canvasModel.size.height - y) < nearThr;
+
     final ffiModel = parent.target!.ffiModel;
     if (isMove) {
       canvasModel.moveDesktopMouse(x, y);
     }
     final d = ffiModel.display;
+    final imageWidth = d.width * canvasModel.scale;
+    final imageHeight = d.height * canvasModel.scale;
     if (canvasModel.scrollStyle == ScrollStyle.scrollbar) {
-      final imageWidth = d.width * canvasModel.scale;
-      final imageHeight = d.height * canvasModel.scale;
       x += imageWidth * canvasModel.scrollX;
       y += imageHeight * canvasModel.scrollY;
 
@@ -483,14 +596,55 @@ class InputModel {
 
     x /= canvasModel.scale;
     y /= canvasModel.scale;
+    if (canvasModel.scale > 0 && canvasModel.scale < 1) {
+      final step = 1.0 / canvasModel.scale - 1;
+      if (nearRight) {
+        x += step;
+      }
+      if (nearBottom) {
+        y += step;
+      }
+    }
     x += d.x;
     y += d.y;
-    if (type != '') {
-      x = 0;
-      y = 0;
+
+    if (onExit) {
+      final pos = setNearestEdge(x, y, d);
+      x = pos.dx;
+      y = pos.dy;
     }
-    evt['x'] = '${x.round()}';
-    evt['y'] = '${y.round()}';
+
+    var evtX = 0;
+    var evtY = 0;
+    try {
+      evtX = x.round();
+      evtY = y.round();
+    } catch (e) {
+      debugPrintStack(
+          label: 'canvasModel.scale value ${canvasModel.scale}, $e');
+      return;
+    }
+
+    int minX = d.x.toInt();
+    int maxX = (d.x + d.width).toInt() - 1;
+    int minY = d.y.toInt();
+    int maxY = (d.y + d.height).toInt() - 1;
+    evtX = trySetNearestRange(evtX, minX, maxX, 5);
+    evtY = trySetNearestRange(evtY, minY, maxY, 5);
+    if (evtX < minX || evtY < minY || evtX > maxX || evtY > maxY) {
+      // If left mouse up, no early return.
+      if (evt['buttons'] != kPrimaryMouseButton || type != 'up') {
+        return;
+      }
+    }
+
+    if (type != '') {
+      evtX = 0;
+      evtY = 0;
+    }
+
+    evt['x'] = '$evtX';
+    evt['y'] = '$evtY';
     var buttons = '';
     switch (evt['buttons']) {
       case kPrimaryMouseButton:
@@ -510,7 +664,7 @@ class InputModel {
         break;
     }
     evt['buttons'] = buttons;
-    bind.sessionSendMouse(id: id, msg: json.encode(evt));
+    bind.sessionSendMouse(sessionId: sessionId, msg: json.encode(evt));
   }
 
   /// Web only

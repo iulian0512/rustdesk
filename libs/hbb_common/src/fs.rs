@@ -10,7 +10,7 @@ use crate::{bail, get_version_number, message_proto::*, ResultType, Stream};
 // https://doc.rust-lang.org/std/os/windows/fs/trait.MetadataExt.html
 use crate::{
     compress::{compress, decompress},
-    config::{Config, COMPRESS_LEVEL},
+    config::Config,
 };
 
 pub fn read_dir(path: &Path, include_hidden: bool) -> ResultType<FileDirectory> {
@@ -481,7 +481,7 @@ impl TransferJob {
         } else {
             self.finished_size += offset as u64;
             if !is_compressed_file(name) {
-                let tmp = compress(&buf, COMPRESS_LEVEL);
+                let tmp = compress(&buf);
                 if tmp.len() < buf.len() {
                     buf = tmp;
                     compressed = true;
@@ -823,14 +823,19 @@ pub fn is_write_need_confirmation(
         let modified_time = metadata.modified()?;
         let remote_mt = Duration::from_secs(digest.last_modified);
         let local_mt = modified_time.duration_since(UNIX_EPOCH)?;
+        // [Note]
+        // We decide to give the decision whether to override the existing file to users,
+        // which obey the behavior of the file manager in our system.
+        let mut is_identical = false;
         if remote_mt == local_mt && digest.file_size == metadata.len() {
-            return Ok(DigestCheckResult::IsSame);
+            is_identical = true;
         }
         Ok(DigestCheckResult::NeedConfirm(FileTransferDigest {
             id: digest.id,
             file_num: digest.file_num,
             last_modified: local_mt.as_secs(),
             file_size: metadata.len(),
+            is_identical,
             ..Default::default()
         }))
     } else {
