@@ -1,3 +1,4 @@
+***** OBSOLETE ********
 git clone https://github.com/microsoft/vcpkg
 cd vcpkg
 git checkout 2023.04.15
@@ -11,6 +12,12 @@ git clone https://github.com/fzyzcjy/flutter_rust_bridge
 cd flutter_rust_bridge/frb_codegen
 cargo install --path .
 ~/.cargo/bin/flutter_rust_bridge_codegen --rust-input ./src/flutter_ffi.rs --dart-output ./flutter/lib/generated_bridge.dart
+
+***** OBSOLETE ********
+
+
+
+see .github\workflows\flutter-build.yml
 
 to build
 python build.py --flutter --hwcodec --portable
